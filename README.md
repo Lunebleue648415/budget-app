@@ -46,8 +46,8 @@ PS : si vous avez des suggestions pour le nom, je suis preneur.
 
 ## Installer l'application
 
-Va chercher l'archive de ton système, décompresse-la
-quelque part où tu as le droit d'écrire, et lance `Budget App`.
+Télécharge l'application depuis la section Assets de la page Releases (https://github.com/Lunebleue8932/budget-app/releases). 
+Va chercher l'archive de ton système, décompresse-la quelque part où tu as le droit d'écrire, et lance `Budget App`.
 
 | Système | Archive | Au premier lancement |
 |---|---|---|
