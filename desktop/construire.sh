@@ -125,6 +125,26 @@ else
     RACINE_EXEC="$BUNDLE"
 fi
 
+# CE FICHIER FAIT DE CE BUNDLE UN BUILD DE TEST (cf. database.est_build_de_test).
+#
+# Le chemin de la base est memorise dans le profil de l'utilisateur, lequel est
+# partage par TOUTES les copies de l'application sur la machine. Sans ce
+# marqueur, un bundle reconstruit pour essayer trois lignes de code s'ouvrirait
+# sur la VRAIE base personnelle. Avec lui, il part toujours de sa propre base de
+# test et n'ecrit jamais dans le profil.
+#
+# Le workflow qui produit les Releases ne le pose PAS : une version publiee doit
+# retenir le choix de son utilisateur.
+cat > "$RACINE_EXEC/BUILD-DE-TEST.txt" <<'MARQUEUR'
+Ce dossier est un BUILD DE TEST, construit en local.
+
+Il ouvre toujours la base de test rangee dans son propre dossier « data », et
+n'ecrit jamais dans la configuration de l'application. Changer de base depuis
+Parametres -> Base de donnees ne vaut que pour la session.
+
+Supprime ce fichier pour que ce bundle se comporte comme une version publiee.
+MARQUEUR
+
 # LE MARQUEUR dit « ce dossier vient du dépôt, ce script l'a posé ». Il permet
 # de retirer d'abord tout ce que la construction précédente avait installé —
 # sans quoi une extension renommée ou supprimée survivrait dans le bundle, en

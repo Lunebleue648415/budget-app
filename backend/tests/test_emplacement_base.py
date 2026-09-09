@@ -17,6 +17,7 @@ import json
 import pytest
 
 from app import config_utilisateur, database
+from app.routers import parametres_base
 
 
 @pytest.fixture
@@ -180,3 +181,49 @@ def test_pas_de_configuration_forcee_en_developpement(monkeypatch):
     monkeypatch.delenv("BUDGET_DB_PATH", raising=False)
     monkeypatch.delenv("BUDGET_FORCER_CHOIX_BASE", raising=False)
     assert not database.configuration_requise()
+
+
+# ---------- Isolation des builds de test ----------
+#
+# CE QUE CES TESTS PROTÈGENT : qu'un bundle reconstruit pour essayer trois
+# lignes de code n'ouvre JAMAIS la vraie base personnelle. Le chemin est
+# mémorisé dans le profil de l'utilisateur, lequel est partagé par toutes les
+# copies de l'application présentes sur la machine — sans cette isolation, une
+# manipulation de mise au point se fait sur de vraies finances.
+
+
+def test_en_developpement_ce_n_est_jamais_un_build_de_test(monkeypatch):
+    """Le marqueur ne concerne que les bundles packagés : en développement, la
+    base du dépôt est déjà la bonne, et il n'y a pas d'exécutable à côté duquel
+    chercher quoi que ce soit."""
+    monkeypatch.setattr(database.sys, "frozen", False, raising=False)
+    assert not database.est_build_de_test()
+
+
+def test_le_marqueur_pose_a_cote_de_l_executable_fait_un_build_de_test(tmp_path, monkeypatch):
+    monkeypatch.setattr(database.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(database, "dossier_application", lambda: tmp_path)
+
+    assert not database.est_build_de_test(), "sans marqueur, ce n'est pas un build de test"
+    (tmp_path / database.NOM_MARQUEUR_BUILD_TEST).write_text("peu importe", encoding="utf-8")
+    assert database.est_build_de_test(), "le marqueur seul doit suffire"
+
+
+def test_un_build_de_test_n_ecrit_jamais_dans_le_profil(tmp_path, config_temporaire, monkeypatch):
+    """LA garantie : laisser un bundle de mise au point écrire dans le profil
+    ferait pointer la VRAIE application sur la base ouverte pour un essai."""
+    monkeypatch.setattr(database, "est_build_de_test", lambda: True)
+
+    assert parametres_base._memoriser(tmp_path / "essai.db") is False
+    assert config_utilisateur.chemin_base_memorise() is None
+    assert not config_utilisateur.fichier_config().exists()
+
+
+def test_hors_build_de_test_le_choix_est_bien_memorise(tmp_path, config_temporaire, monkeypatch):
+    """Le pendant du test précédent : sans marqueur, la mémorisation doit
+    fonctionner — c'est elle qui protège les données des mises à jour."""
+    monkeypatch.setattr(database, "est_build_de_test", lambda: False)
+    cible = tmp_path / "mes-documents" / "budget.db"
+
+    assert parametres_base._memoriser(cible) is True
+    assert config_utilisateur.chemin_base_memorise() == cible

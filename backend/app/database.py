@@ -60,6 +60,47 @@ def _chemin_impose_par_environnement() -> Path | None:
     return Path(valeur).expanduser() if valeur else None
 
 
+def dossier_application() -> Path:
+    """Le dossier qu'une mise à jour REMPLACE : celui de l'exécutable en
+    application packagée, la racine du dépôt en développement."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return _BACKEND_DIR.parent
+
+
+# Fichier témoin posé par les scripts de construction LOCAUX
+# (desktop/platforms/windows/construire.ps1, desktop/construire.sh), jamais par
+# le workflow qui produit les Releases. Sa seule présence fait de ce bundle un
+# BUILD DE TEST.
+NOM_MARQUEUR_BUILD_TEST = "BUILD-DE-TEST.txt"
+
+
+def est_build_de_test() -> bool:
+    """Ce bundle est-il une construction locale de mise au point ?
+
+    POURQUOI CETTE DISTINCTION EXISTE. Le chemin de la base est mémorisé dans le
+    profil de l'utilisateur (cf. config_utilisateur), et ce profil est partagé
+    par TOUTES les copies de l'application présentes sur la machine. Sur une
+    machine de développement, où l'on reconstruit le bundle dix fois par jour,
+    cela veut dire qu'un simple essai s'ouvre sur la VRAIE base personnelle —
+    et qu'une manipulation de test se fait sur de vraies finances.
+
+    Un build de test se comporte donc comme l'ancienne extension développeur :
+    il part toujours de sa propre base de test, à côté de lui, et ne mémorise
+    rien de ce qu'on lui fait ouvrir (cf. routers/parametres_base). La version
+    publiée, elle, garde la mémorisation — c'est elle qui protège les données
+    des mises à jour, et un utilisateur n'a aucune raison de redésigner sa base
+    à chaque lancement.
+
+    LE MARQUEUR EST UN FICHIER, ET NON UN DRAPEAU COMPILÉ : il se voit dans le
+    dossier, il s'explique tout seul, et le supprimer suffit à rendre au bundle
+    le comportement d'une version publiée — sans reconstruire quoi que ce soit.
+    """
+    if not getattr(sys, "frozen", False):
+        return False
+    return (dossier_application() / NOM_MARQUEUR_BUILD_TEST).is_file()
+
+
 # Renseigné quand un chemin ÉTAIT mémorisé mais que le fichier a disparu :
 # disque externe débranché, dossier renommé, fichier supprimé. L'application
 # repart alors sur son emplacement par défaut, mais le panneau « Base de
@@ -98,6 +139,12 @@ def _resoudre_chemin_demarrage() -> Path:
     # dans le profil. C'est exactement le genre de bascule implicite que le
     # module refuse depuis toujours.
     if not getattr(sys, "frozen", False) and os.environ.get("BUDGET_FORCER_CHOIX_BASE") != "1":
+        return _DEFAULT_DEV_DB_PATH
+    # UN BUILD DE TEST NE LIT JAMAIS LE CHOIX MÉMORISÉ. Le profil utilisateur
+    # est partagé par toutes les copies de l'application sur la machine : sans
+    # cette ligne, un bundle reconstruit pour essayer trois lignes de code
+    # s'ouvre sur la vraie base personnelle (cf. est_build_de_test).
+    if est_build_de_test():
         return _DEFAULT_DEV_DB_PATH
     from . import config_utilisateur
 
@@ -253,14 +300,6 @@ def migrer_si_necessaire(chemin: Path) -> tuple[Path | None, str | None]:
     return sauvegarde, revision
 
 
-def dossier_application() -> Path:
-    """Le dossier qu'une mise à jour REMPLACE : celui de l'exécutable en
-    application packagée, la racine du dépôt en développement."""
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
-    return _BACKEND_DIR.parent
-
-
 def chemin_a_risque(chemin: Path) -> bool:
     """Vrai quand la base vit DANS le dossier de l'application.
 
@@ -322,6 +361,12 @@ def configuration_requise() -> bool:
         if _chemin_impose_par_environnement() is not None:
             return False
         if not getattr(sys, "frozen", False):
+            return False
+        # UN BUILD DE TEST N'A RIEN À DEMANDER : sa base de test vit à côté de
+        # l'exécutable, donc « à risque » par construction, et c'est exactement
+        # ce qu'on veut de lui. Poser la question à chaque lancement d'un bundle
+        # qu'on reconstruit dix fois par jour n'aurait aucun sens.
+        if est_build_de_test():
             return False
     return chemin_a_risque(get_chemin_actuel())
 

@@ -11006,7 +11006,18 @@ async function loadParametresBdd() {
           `le fichier est simplement ailleurs (disque débranché, dossier renommé).`
       );
     }
-    if (!etat.choix_memorise) {
+    // L'ORDRE COMPTE : sur un build de test, `choix_memorise` est faux PAR
+    // CONSTRUCTION, et annoncer « le choix n'a pas pu être enregistré » ferait
+    // croire à une panne. Le message du build de test dit la même chose, mais
+    // en donnant la raison.
+    if (etat.build_de_test) {
+      messages.push(
+        "Build de test construit en local : cette copie ouvre toujours sa propre base de test " +
+          "et n'écrit jamais dans la configuration de l'application. Changer de base ne vaut " +
+          "que pour cette session. Supprime le fichier BUILD-DE-TEST.txt à côté de l'exécutable " +
+          "pour qu'elle se comporte comme une version publiée."
+      );
+    } else if (!etat.choix_memorise) {
       messages.push(
         "Ce choix n'a pas pu être enregistré : il ne vaudra que pour cette session."
       );

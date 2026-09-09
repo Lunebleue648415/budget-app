@@ -47,9 +47,18 @@ $Sauvegardes = Join-Path $Desktop "sauvegardes"
 # L'exe verrouille ses propres DLL tant qu'il tourne : la suppression du
 # dossier échoue alors à mi-chemin, ce qui laisse un bundle à moitié effacé.
 # Mieux vaut refuser tout de suite, avec un message qui dit quoi faire.
-$EnCours = Get-Process -Name "Budget App" -ErrorAction SilentlyContinue
+#
+# SEULES LES INSTANCES LANCÉES DEPUIS CE BUNDLE COMPTENT. Un `Get-Process -Name
+# "Budget App"` attrapait n'importe quelle copie de l'application ouverte sur la
+# machine -- une release téléchargée dans « Downloads », par exemple -- et
+# refusait de reconstruire alors qu'elle ne verrouille rien ici. Sur une machine
+# où l'on développe l'application ET où on l'utilise pour de vrai, ça revenait à
+# devoir fermer son budget pour compiler.
+$EnCours = Get-CimInstance Win32_Process -Filter "Name = 'Budget App.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($Bundle, [StringComparison]::OrdinalIgnoreCase) }
 if ($EnCours) {
-    Write-Host "L'application « Budget App » est en cours d'exécution (PID $($EnCours.Id))." -ForegroundColor Red
+    Write-Host "Une application « Budget App » de CE bundle est en cours d'exécution (PID $($EnCours.ProcessId))." -ForegroundColor Red
+    Write-Host "  $($EnCours.ExecutablePath)"
     Write-Host "Ferme-la puis relance ce script : PyInstaller ne peut pas remplacer un bundle verrouillé."
     exit 1
 }
@@ -94,6 +103,28 @@ if (Test-Path $AncienInternal) { Remove-Item $AncienInternal -Recurse -Force }
 Copy-Item (Join-Path $Neuf "_internal") $Bundle -Recurse -Force
 Get-ChildItem -Path $Neuf -File | ForEach-Object { Copy-Item $_.FullName $Bundle -Force }
 Remove-Item $Staging -Recurse -Force
+
+# CE FICHIER FAIT DE CE BUNDLE UN BUILD DE TEST (cf. database.est_build_de_test).
+#
+# Le chemin de la base est mémorisé dans le profil de l'utilisateur, lequel est
+# partagé par TOUTES les copies de l'application sur la machine. Sans ce
+# marqueur, un bundle reconstruit pour essayer trois lignes de code s'ouvrirait
+# sur la VRAIE base personnelle -- et une manipulation de test se ferait sur de
+# vraies finances. Avec lui, ce bundle part toujours de sa propre base de test,
+# à côté de lui, et n'écrit jamais dans le profil.
+#
+# Le workflow qui produit les Releases ne le pose PAS : une version publiée doit
+# retenir le choix de son utilisateur, c'est ce qui protège ses données des
+# mises à jour.
+@'
+Ce dossier est un BUILD DE TEST, construit en local.
+
+Il ouvre toujours la base de test rangée dans son propre dossier « data », et
+n'écrit jamais dans la configuration de l'application (%LOCALAPPDATA%\Budget App).
+Changer de base depuis Paramètres -> Base de données ne vaut que pour la session.
+
+Supprime ce fichier pour que ce bundle se comporte comme une version publiée.
+'@ | Set-Content -Path (Join-Path $Bundle "BUILD-DE-TEST.txt") -Encoding utf8
 
 # CE QUI FAIT DE CE BUNDLE UNE VERSION DÉVELOPPEUR.
 #

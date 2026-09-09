@@ -35,7 +35,16 @@ def _memoriser(chemin) -> bool:
     """Retient `chemin` pour les prochains lancements — sauf s'il est à risque,
     auquel cas on efface au contraire ce qui était retenu. Rend False quand
     l'écriture a échoué (profil en lecture seule) : la bascule ne vaut alors
-    que pour la session, et l'écran le dit."""
+    que pour la session, et l'écran le dit.
+
+    UN BUILD DE TEST N'ÉCRIT JAMAIS DANS LE PROFIL. Le fichier de configuration
+    est partagé par toutes les copies de l'application présentes sur la machine :
+    laisser un bundle de mise au point y écrire reviendrait à faire pointer la
+    VRAIE application sur la base qu'on venait d'ouvrir pour un essai. Il se
+    comporte donc comme l'ancienne extension développeur — la bascule vaut pour
+    la session, et rien au-delà."""
+    if database.est_build_de_test():
+        return False
     if database.chemin_a_risque(chemin):
         config_utilisateur.oublier_chemin_base()
         return True
@@ -63,6 +72,7 @@ def _lire_etat(migration=None, choix_memorise: bool = True) -> schemas.BaseDonne
         dossier_application=str(database.dossier_application()),
         base_memorisee_introuvable=str(introuvable) if introuvable else None,
         choix_memorise=choix_memorise,
+        build_de_test=database.est_build_de_test(),
     )
 
 

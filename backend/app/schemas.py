@@ -1534,6 +1534,11 @@ class BaseDonneesRead(BaseModel):
     # bascule vaut alors pour la session seulement, et il faut le dire plutôt
     # que de laisser croire que c'est réglé.
     choix_memorise: bool = True
+    # Bundle construit localement pour la mise au point (cf.
+    # database.est_build_de_test) : il part toujours de sa base de test et ne
+    # mémorise rien. L'écran le dit, sans quoi on croirait à une panne de la
+    # mémorisation.
+    build_de_test: bool = False
     # Renseigné par /parametres/base/installer seulement : « ouverte »,
     # « déplacée » ou « créée ». Le frontend ne peut pas le déduire — il ne sait
     # pas si le fichier existait avant sa requête.
