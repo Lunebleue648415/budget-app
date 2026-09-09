@@ -8,10 +8,18 @@ se cachent les erreurs qui ne se voient que sur une vraie base existante.
 import os
 import sqlite3
 import subprocess
+import sys
 from pathlib import Path
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
-PYTHON = BACKEND_DIR / ".venv" / "Scripts" / "python.exe"
+# `sys.executable` et non `.venv/Scripts/python.exe` : ce dernier suppose un
+# venv Windows créé à la main, qui n'existe jamais sur les runners de CI
+# (`actions/setup-python` installe directement dans le Python du système,
+# quel que soit l'OS) -- l'ancien chemin n'aurait fonctionné nulle part en CI.
+# `sys.executable` est l'interpréteur qui exécute déjà pytest, avec les mêmes
+# dépendances installées : c'est le seul chemin garanti d'exister, en local
+# comme en CI, sur les trois systèmes.
+PYTHON = sys.executable
 
 
 def _alembic(db_path: Path, revision: str):

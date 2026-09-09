@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -9,16 +10,34 @@ from sqlalchemy import text
 from app import database
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
-PYTHON = BACKEND_DIR / ".venv" / "Scripts" / "python.exe"
+# `sys.executable` et non `.venv/Scripts/python.exe` : ce dernier suppose un
+# venv Windows créé à la main, qui n'existe jamais sur les runners de CI
+# (`actions/setup-python` installe directement dans le Python du système,
+# quel que soit l'OS) -- l'ancien chemin n'aurait fonctionné nulle part en CI.
+# `sys.executable` est l'interpréteur qui exécute déjà pytest, avec les mêmes
+# dépendances installées : c'est le seul chemin garanti d'exister, en local
+# comme en CI, sur les trois systèmes.
+PYTHON = sys.executable
 
 
 @pytest.fixture()
 def restaurer_base_apres_test():
     """L'état de la base courante est un singleton process-wide (cf.
     database._etat) : le restaurer après chaque test évite qu'un test laisse
-    l'app pointée ailleurs pour la suite de la session pytest."""
+    l'app pointée ailleurs pour la suite de la session pytest.
+
+    `chemin_avant` PEUT NE PAS ENCORE EXISTER COMME FICHIER : c'est le cas de
+    la base de dev par défaut sur un dépôt qu'on vient de cloner, SQLite ne la
+    créant qu'à la première connexion réelle (cf. database._appliquer, appelé
+    une fois à l'import du module, sans jamais écrire sur le disque). Sans
+    cette création, `changer_base` refuserait de restaurer un chemin qu'il ne
+    trouve pas -- alors qu'il s'agit précisément du chemin de départ, jamais
+    touché par le test lui-même."""
     chemin_avant = database.get_chemin_actuel()
     yield
+    if not chemin_avant.is_file():
+        chemin_avant.parent.mkdir(parents=True, exist_ok=True)
+        chemin_avant.touch()
     database.changer_base(str(chemin_avant))
 
 
