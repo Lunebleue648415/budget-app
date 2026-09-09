@@ -141,11 +141,29 @@ jobs:
           sudo apt-get install -y libgirepository1.0-dev gir1.2-webkit2-4.1 \
             libcairo2-dev python3-gi python3-gi-cairo
 
+      # VERSIONS ÉPINGLÉES, ET C'EST DÉLIBÉRÉ. PyInstaller ne fait pas que
+      # compiler : c'est lui (via pyinstaller-hooks-contrib) qui décide QUELLES
+      # DLL natives embarquer pour pythonnet/clr_loader, la pile qui ouvre la
+      # fenêtre sur Windows. Un simple `pip install pyinstaller pywebview`
+      # installe la dernière version disponible AU MOMENT DU BUILD — deux
+      # Releases construites à quelques semaines d'écart peuvent embarquer des
+      # hooks différents, sans qu'aucun commit ne l'explique. C'est exactement
+      # ce qui s'est produit le 9 septembre 2026 (v1.0.2) : le bundle Windows
+      # buildé en CI avec pyinstaller-hooks-contrib 2026.7 échouait au
+      # démarrage (« Failed to resolve Python.Runtime.Loader.Initialize »,
+      # cf. clr_loader/netfx.py), alors que le même code, construit en local
+      # avec pyinstaller 6.21.0 + hooks-contrib 2026.6, démarrait sans erreur.
+      #
+      # Ces numéros sont donc la référence CONNUE POUR MARCHER, vérifiée sur ce
+      # projet. Les remonter est un choix délibéré, pas un oubli — à faire un à
+      # la fois, en reconstruisant et en testant le lancement réel de la
+      # fenêtre (pas seulement que PyInstaller termine sans erreur) avant de
+      # committer la remontée.
       - name: Dépendances Python
         run: |
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt
-          pip install pyinstaller pywebview
+          pip install pyinstaller==6.21.0 pyinstaller-hooks-contrib==2026.6 pywebview==6.2.1 pythonnet==3.1.0 clr_loader==0.3.1
 
       # Les trois formats sont produits depuis n'importe quel système (encodeurs
       # écrits en bibliothèque standard) : chaque runner régénère le sien plutôt
