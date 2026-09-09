@@ -92,6 +92,13 @@ Toute erreur au démarrage est écrite en détail dans `erreur.log`, à côté d
 base de données. Regarde d'abord là, et joins ce fichier si tu me signales le
 problème.
 
+**Si l'application refuse de démarrer sous Windows** avec une longue trace
+mentionnant `Python.Runtime.dll` : c'est la « marque Internet » que Windows
+pose sur les fichiers téléchargés, et que l'Explorateur recopie sur tout ce
+qu'il extrait d'une archive. Les versions à partir de la v1.0.4 s'en accommodent
+toutes seules. Sur une version antérieure, fais un **clic droit sur le ZIP →
+Propriétés → coche « Débloquer »**, *avant* de le décompresser.
+
 ## Point légal
 
 Le code est visible, il n'est pas libre pour autant. Tous droits réservés :

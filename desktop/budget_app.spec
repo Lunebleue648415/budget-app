@@ -58,6 +58,7 @@ donnees = [
 if not OPTIONS.get("icone_incrustee", True):
     donnees.append((str(ICONE), "."))
 
+
 a = Analysis(
     [str(DOSSIER_DESKTOP / "app_desktop.py")],
     pathex=[str(BACKEND), str(DOSSIER_DESKTOP)],  # `app` et `platforms` importables à l'analyse
@@ -112,6 +113,27 @@ coll = COLLECT(
     upx_exclude=[],
     name="Budget App",
 )
+
+# FICHIERS POSÉS À CÔTÉ DE L'EXÉCUTABLE, APRÈS COLLECT.
+#
+# PAS via `datas` : depuis PyInstaller 6, tout ce qui y passe atterrit dans le
+# sous-dossier `_internal/`, et la racine du dossier livré ne contient plus que
+# l'exécutable. Or ces fichiers-là ne valent QUE s'ils sont à côté de lui —
+# c'est le cas de « Budget App.exe.config », que .NET Framework cherche sous le
+# nom exact de l'exécutable et nulle part ailleurs (vérifié : dans `_internal/`,
+# il est ignoré et l'application meurt au démarrage après un téléchargement).
+#
+# ICI ET NON DANS LES SCRIPTS DE BUILD : il y en a deux (construire.ps1 en
+# local, le workflow GitHub en CI), et un fichier oublié dans l'un des deux ne
+# se verrait que sur les bundles produits par celui-là. La spec est le seul
+# endroit que les deux traversent.
+if OPTIONS.get("fichiers_racine"):
+    import shutil
+
+    racine_livree = Path(DISTPATH) / "Budget App"
+    racine_livree.mkdir(parents=True, exist_ok=True)
+    for nom_fichier in OPTIONS["fichiers_racine"]:
+        shutil.copy2(platforms.DOSSIER_PLATEFORME / nom_fichier, racine_livree / nom_fichier)
 
 # macOS seulement : le Finder ne lance pas un exécutable nu, il lance un
 # bundle .app — un dossier à structure imposée que PyInstaller construit à

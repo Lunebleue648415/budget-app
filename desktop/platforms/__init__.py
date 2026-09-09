@@ -23,9 +23,11 @@ CHAQUE MODULE DE PLATEFORME EXPOSE LA MÊME INTERFACE, et c'est ce qui permet à
     afficher_erreur(t, m)     -> bool, True si une boîte native a pu s'ouvrir
     options_pyinstaller()     -> dict, fusionné dans budget_app.spec
 
-Ce module y ajoute CHEMIN_ICONE, résolu depuis le dossier du module retenu :
-chaque plateforme range son icône chez elle, et la spec n'a donc jamais à
-reconstruire ce chemin à la main.
+Ce module y ajoute DOSSIER_PLATEFORME et CHEMIN_ICONE, résolus depuis le module
+retenu : chaque plateforme range chez elle ce qui lui appartient (son icône, et
+sous Windows la configuration .NET livrée à côté de l'exécutable — clé
+`fichiers_racine` des options), et la spec n'a donc jamais à reconstruire ces
+chemins à la main.
 
 POURQUOI DES IMPORTS STATIQUES ET NON `importlib`. PyInstaller analyse le code
 SANS L'EXÉCUTER : un `importlib.import_module(f"platforms.{nom}")` ne lui dirait
@@ -67,4 +69,5 @@ options_pyinstaller = plateforme.options_pyinstaller
 
 # L'icône est rangée dans le dossier de sa plateforme : `__file__` du module
 # retenu la localise sans que personne ait à réécrire « platforms/<nom>/ ».
-CHEMIN_ICONE = Path(plateforme.__file__).resolve().parent / FICHIER_ICONE
+DOSSIER_PLATEFORME = Path(plateforme.__file__).resolve().parent
+CHEMIN_ICONE = DOSSIER_PLATEFORME / FICHIER_ICONE

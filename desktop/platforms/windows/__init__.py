@@ -43,6 +43,15 @@ def afficher_erreur(titre: str, message: str) -> bool:
         return False
 
 
+# Configuration lue par .NET Framework au chargement du processus. Son nom doit
+# rester CALÉ SUR CELUI DE L'EXÉCUTABLE (« Budget App.exe » -> « Budget
+# App.exe.config ») : c'est par cette convention que .NET la trouve. Renommer
+# l'application impose donc de renommer ce fichier, faute de quoi il cesse
+# silencieusement d'être lu — et l'application recommence à mourir au démarrage
+# après un téléchargement. Le pourquoi est écrit en toutes lettres dedans.
+FICHIER_CONFIG_NET = "Budget App.exe.config"
+
+
 def options_pyinstaller() -> dict:
     """Options passées à EXE() par budget_app.spec.
 
@@ -54,4 +63,8 @@ def options_pyinstaller() -> dict:
         # Aucun bundle à part sur Windows : le dossier produit par COLLECT est
         # directement l'application (« Budget App\Budget App.exe »).
         "bundle": None,
+        # Copiés tels quels À CÔTÉ de l'exécutable, depuis le dossier de cette
+        # plateforme. Windows est le seul à en avoir besoin (cf.
+        # FICHIER_CONFIG_NET) ; les deux autres rendent une liste vide.
+        "fichiers_racine": [FICHIER_CONFIG_NET],
     }
