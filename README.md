@@ -46,13 +46,8 @@ PS : si vous avez des suggestions pour le nom, je suis preneur.
 
 ## Installer l'application
 
-> **Aucune version n'est encore publiée.** La page
-> [Releases](../../releases) est vide pour l'instant — les archives y
-> apparaîtront à la première version. En attendant, il faut construire
-> l'application soi-même (voir `README-dev.md`).
-
-Une fois une version publiée : va chercher l'archive de ton système, décompresse-la
-quelque part où tu as le droit d'écrire, et lance `Budget App`.
+Télécharge l'application depuis la section Assets de la page Releases (https://github.com/Lunebleue8932/budget-app/releases). 
+Va chercher l'archive de ton système, décompresse-la quelque part où tu as le droit d'écrire, et lance `Budget App`.
 
 | Système | Archive | Au premier lancement |
 |---|---|---|
@@ -66,8 +61,7 @@ base de données à côté d'elle-même, et ces dossiers sont protégés en écr
 Un dossier de tes documents fait très bien l'affaire.
 
 Si ton système s'inquiète, c'est normal : l'application **n'est pas signée
-numériquement**. Cette signature se paie tous les ans, chez Microsoft comme chez
-Apple, et je ne l'ai pas prise. Windows et macOS ne savent donc pas qui a écrit
+numériquement** (car c'est payant $$$). Windows et macOS ne savent donc pas qui a écrit
 le programme — ils ne disent pas qu'il est dangereux, ils disent qu'ils ne
 peuvent pas le vérifier. Le tableau ci-dessus donne le geste à faire pour chaque
 système.
