@@ -23,7 +23,6 @@ from .constants import (
     TYPE_COMPTE_PLACEMENT,
     DomaineImport,
     Frequence,
-    FrequenceRemuneration,
     ModeComparaison,
     Sens,
     SensAction,
@@ -271,32 +270,6 @@ class Compte(Base):
     # le plus.
     ordre = Column(Integer, nullable=False, default=0)
 
-    # ---------- Rémunération (extension « Taux d'épargne ») ----------
-    #
-    # Trois colonnes qui ne décrivent QU'UN CALCUL D'AFFICHAGE : aucun solde,
-    # aucun KPI, aucune projection du noyau ne les lit. Les intérêts ne sont
-    # jamais écrits en opérations — une opération est un mouvement constaté, et
-    # ce qui est calculé ici est une prévision qui change à chaque nouveau
-    # virement sur le compte.
-    #
-    # Dans le noyau bien que l'écran soit dans l'extension : une extension
-    # n'emporte jamais son schéma. L'éteindre masque l'écran, garde les taux.
-    #
-    # Le taux est ANNUEL, toujours, quelle que soit la fréquence : c'est ainsi
-    # qu'une banque l'annonce, et la seule façon de comparer deux comptes.
-    # NULL = compte non rémunéré, qui est le cas de tous les comptes existants.
-    taux_remuneration = Column(Float, nullable=True)
-    frequence_remuneration = Column(
-        Enum(FrequenceRemuneration, native_enum=False, values_callable=_enum_values),
-        nullable=True,
-    )
-    # À partir de quand le compte rapporte, et sur quel calendrier tombent les
-    # versements. Sans elle, le calcul part de la première opération du compte :
-    # c'est le repère le plus proche de la vérité dont l'app dispose, mais un
-    # compte ouvert bien avant sa première ligne importée le fausse — d'où cette
-    # date, qu'on renseigne quand on la connaît.
-    remuneration_debut = Column(Date, nullable=True)
-
     operations = relationship("Operation", back_populates="compte")
     type_compte = relationship("TypeCompte")
     # Au moins une ligne, toujours (garanti par les routeurs) : un compte sans
@@ -322,12 +295,6 @@ class Compte(Base):
         saisie et retenue pour une ligne importée (un relevé bancaire ne dit
         pas dans quelle monnaie il est libellé)."""
         return self.monnaies[0].monnaie_id if self.monnaies else None
-
-    @property
-    def est_remunere(self) -> bool:
-        """Un taux posé ET une fréquence : l'un sans l'autre ne décrit rien de
-        calculable, et vaut donc « pas de rémunération »."""
-        return self.taux_remuneration is not None and self.frequence_remuneration is not None
 
     @property
     def est_placement(self) -> bool:
@@ -408,10 +375,34 @@ class Operation(Base):
     amortissement_debut = Column(Date, nullable=True)
     amortissement_fin = Column(Date, nullable=True)
 
+    # LES FRAIS COMPRIS DANS `montant` (migration 0051), et rien d'autre.
+    #
+    # PUREMENT DESCRIPTIF : `montant` reste ce qui a bougé sur le compte, frais
+    # compris — ajoutés à ce qui sort, retranchés de ce qui entre (cf.
+    # services/import_bancaire._appliquer_frais). Aucun solde, aucun KPI, aucune
+    # barre d'histogramme ne lit cette colonne : elle répond à « de quoi ce
+    # montant est-il fait », pas à « combien ». C'est la même nature d'annotation
+    # que `montant_du`.
+    #
+    # Sans elle, les frais disparaissaient à l'import : l'aperçu savait écrire
+    # « dont frais 2 € », l'opération enregistrée ne portait plus qu'un montant
+    # de 102 € dont plus rien ne disait qu'il en contenait 2 de frais.
+    #
+    # NULL = personne ne l'a jamais renseigné (toutes les opérations d'avant la
+    # migration), ce qu'un zéro n'aurait pas su dire.
+    frais = Column(Float, nullable=True)
+    # La devise des frais, quand elle diffère de celle de l'opération : c'est
+    # elle qui décide à quel montant ils s'appliquent sur un virement entre deux
+    # monnaies. NULL = celle de l'opération, le cas ordinaire.
+    monnaie_frais_id = Column(
+        Integer, ForeignKey("monnaie.id", ondelete="SET NULL"), nullable=True
+    )
+
     compte = relationship("Compte", back_populates="operations")
     categorie = relationship("Categorie")
     type_operation = relationship("TypeOperationDB")
-    monnaie = relationship("Monnaie")
+    monnaie = relationship("Monnaie", foreign_keys=[monnaie_id])
+    monnaie_frais = relationship("Monnaie", foreign_keys=[monnaie_frais_id])
     # Les projets qui la comptent (extension « Projets »). PLUSIEURS, à la
     # différence de la catégorie : un projet regroupe par événement, pas par
     # nature (cf. SousFiltre). La table de liaison est dans le noyau, comme tout
@@ -419,6 +410,26 @@ class Operation(Base):
     sous_filtres = relationship(
         "SousFiltre", secondary="operation_sous_filtre", back_populates="operations"
     )
+    # Les parts d'une opération DÉCOUPÉE (migration 0049). Vide dans l'immense
+    # majorité des cas : une opération porte sa catégorie dans `categorie_id`,
+    # et ces lignes n'existent que quand une seule catégorie ne suffit pas.
+    # Triées par `ordre` pour que l'écran les réaffiche dans l'ordre saisi.
+    decoupes = relationship(
+        "OperationDecoupe",
+        back_populates="operation",
+        cascade="all, delete-orphan",
+        order_by="OperationDecoupe.ordre",
+    )
+
+    @property
+    def est_decoupee(self) -> bool:
+        """Cette opération répartit-elle son montant entre plusieurs catégories ?
+
+        LA PRÉSENCE DES PARTS EST LE SEUL TÉMOIN — pas de colonne booléenne à
+        maintenir en accord avec elles. C'est la même règle que `remboursable`,
+        qui se déduit du type plutôt que d'être stocké : un drapeau et la donnée
+        qu'il décrit finissent toujours par diverger."""
+        return bool(self.decoupes)
 
     @property
     def type_code(self) -> str:
@@ -484,6 +495,61 @@ class Operation(Base):
         Index("ix_operation_virement_id", "virement_id"),
         Index("ix_operation_recurrence_parent_id", "recurrence_parent_id"),
         Index("ix_operation_monnaie_id", "monnaie_id"),
+    )
+
+
+
+class OperationDecoupe(Base):
+    """Une part d'une opération DÉCOUPÉE : un montant, une catégorie.
+
+    POURQUOI UNE TABLE PLUTÔT QUE PLUSIEURS OPÉRATIONS. Un plein de courses à
+    120 € dont 30 € de produits ménagers est UNE opération : une seule ligne au
+    relevé, une seule date, un seul mouvement de compte. La découper en deux
+    opérations aurait fait diverger le solde de l'app du relevé bancaire dès
+    qu'on en supprime une, et dupliqué en base le libellé, le compte, la
+    monnaie et le statut — exactement ce que l'amortissement a refusé de faire
+    pour la même raison (cf. Operation.amorti).
+
+    L'OPÉRATION DÉCOUPÉE NE PORTE PLUS DE CATÉGORIE : `categorie_id` passe à
+    NULL, comme pour les types à catégorie imposée. Ces lignes SONT sa
+    classification, et laisser en plus une catégorie sur l'opération aurait posé
+    la question, à chaque calcul, de laquelle des deux compte — un histogramme
+    qui additionnerait les deux compterait la dépense deux fois.
+
+    LA SOMME DES PARTS VAUT LE MONTANT, exactement. C'est l'invariant de la
+    table : sans lui, l'histogramme ne totaliserait plus les mêmes sorties que
+    les KPI posés juste à côté. Il est vérifié en 400 sur les routes
+    (routers/operations._valider_decoupes) et rattrapé en dernier filet par
+    crud._appliquer_decoupes, sur le modèle de `montant_du` pour les prêts.
+
+    SEUL LE TYPE `classique` EN PORTE. Les autres ont soit une catégorie imposée
+    par leur type, soit un montant dû ou une contrepartie dont la répartition
+    entre les parts n'aurait pas de sens univoque.
+    """
+
+    __tablename__ = "operation_decoupe"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    operation_id = Column(
+        Integer, ForeignKey("operation.id", ondelete="CASCADE"), nullable=False
+    )
+    # Obligatoire : une part sans catégorie ne classerait rien, et le montant
+    # qu'elle porte disparaîtrait de l'histogramme sans que la somme des parts
+    # cesse pour autant de valoir le montant.
+    categorie_id = Column(Integer, ForeignKey("categorie.id"), nullable=False)
+    montant = Column(Float, nullable=False)
+    # Rang d'affichage, posé par l'écran à l'enregistrement. Les parts n'ont pas
+    # d'ordre naturel (ni date, ni hiérarchie) et une liste qui se réordonne
+    # toute seule d'une ouverture à l'autre du formulaire se lit mal.
+    ordre = Column(Integer, nullable=False, default=0)
+
+    operation = relationship("Operation", back_populates="decoupes")
+    categorie = relationship("Categorie")
+
+    __table_args__ = (
+        CheckConstraint("montant > 0", name="ck_operation_decoupe_montant_positif"),
+        Index("ix_operation_decoupe_operation_id", "operation_id"),
+        Index("ix_operation_decoupe_categorie_id", "categorie_id"),
     )
 
 
@@ -910,6 +976,12 @@ class RegleCategorisation(Base):
     nom = Column(String, nullable=False)
     ordre = Column(Integer, nullable=False, default=0)
     actif = Column(Boolean, nullable=False, default=True)
+    # Une NOTE LIBRE sur la règle (migration 0050), jamais lue par
+    # l'application. Le nom et les conditions disent ce qu'une règle fait ; ils
+    # ne disent pas POURQUOI elle existe — quel relevé l'a rendue nécessaire,
+    # quel cas particulier elle rattrape. Chaîne vide (jamais NULL) quand rien
+    # n'est écrit, comme `sous_filtre.description`.
+    description = Column(String, nullable=False, default="")
     # Faut-il s'arrêter là quand cette règle correspond ? Coché par défaut :
     # c'est le comportement historique (première règle gagnante). Décoché,
     # l'évaluation continue vers le bas, les règles suivantes ne pouvant que
@@ -942,6 +1014,16 @@ class RegleCategorisation(Base):
     categorie = relationship("Categorie")
     type_operation = relationship("TypeOperationDB")
     compte_autre = relationship("Compte")
+    # La DÉCOUPE que la règle impose (migration 0049). Vide = la règle pose une
+    # catégorie unique, comme avant. Non vide, elle remplace `categorie_id` :
+    # les deux ne peuvent pas coexister, le routeur neutralise l'un dès que
+    # l'autre est renseigné.
+    decoupes = relationship(
+        "RegleDecoupe",
+        back_populates="regle",
+        cascade="all, delete-orphan",
+        order_by="RegleDecoupe.ordre",
+    )
 
     @property
     def type_code(self) -> str:
@@ -953,6 +1035,51 @@ class RegleCategorisation(Base):
         Index("ix_regle_categorisation_ordre", "ordre"),
         Index("ix_regle_categorisation_compte_autre_id", "compte_autre_id"),
     )
+
+
+class RegleDecoupe(Base):
+    """Une part de la découpe qu'une règle impose : une catégorie, et une
+    FORMULE qui dit combien lui revient.
+
+    POURQUOI UNE FORMULE ET PAS UN MONTANT. Une règle s'applique à des lignes
+    dont on ne connaît pas le montant à l'avance : « les 50 premiers euros de
+    chaque note de restaurant vont en Repas, le reste en Sorties » ne se dit pas
+    avec deux nombres fixes. La formule prend le montant de la ligne comme
+    variable (`montant`), et sait en tirer une part : `min(montant; 50)` pour la
+    première, `reste` pour la seconde.
+
+    La grammaire acceptée tient en peu de choses — nombres, `montant`, `reste`,
+    les quatre opérations, les parenthèses, `min` et `max` — et elle est lue par
+    un parseur écrit à la main (cf. services/formule_decoupe.py). JAMAIS `eval` :
+    ces chaînes viennent d'un formulaire, et une expression Python arbitraire
+    exécutée côté serveur n'est pas une fonctionnalité, c'est une porte.
+
+    `reste` NE VAUT QUE SUR LA DERNIÈRE PART, et c'est ce qui rend l'invariant
+    « somme des parts = montant » tenable : les parts calculées prennent ce que
+    leur formule dit, la dernière prend ce qui reste. Sans elle, l'utilisateur
+    devrait écrire une soustraction exacte de toutes les précédentes, et la
+    moindre erreur d'arrondi produirait une découpe refusée à l'import.
+    """
+
+    __tablename__ = "regle_decoupe"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    regle_id = Column(
+        Integer, ForeignKey("regle_categorisation.id", ondelete="CASCADE"), nullable=False
+    )
+    categorie_id = Column(
+        Integer, ForeignKey("categorie.id", ondelete="CASCADE"), nullable=False
+    )
+    # Expression textuelle, conservée telle que l'utilisateur l'a écrite : c'est
+    # elle qu'on lui réaffiche. Sa validité est vérifiée à l'écriture (le
+    # parseur la relit), jamais devinée à la lecture.
+    formule = Column(String, nullable=False)
+    ordre = Column(Integer, nullable=False, default=0)
+
+    regle = relationship("RegleCategorisation", back_populates="decoupes")
+    categorie = relationship("Categorie")
+
+    __table_args__ = (Index("ix_regle_decoupe_regle_id", "regle_id"),)
 
 
 class RemboursementLien(Base):
@@ -1019,6 +1146,12 @@ class RegleImportPlacement(Base):
     nom = Column(String, nullable=False)
     ordre = Column(Integer, nullable=False, default=0)
     actif = Column(Boolean, nullable=False, default=True)
+    # Une NOTE LIBRE sur la règle (migration 0050), jamais lue par
+    # l'application. Le nom et les conditions disent ce qu'une règle fait ; ils
+    # ne disent pas POURQUOI elle existe — quel relevé l'a rendue nécessaire,
+    # quel cas particulier elle rattrape. Chaîne vide (jamais NULL) quand rien
+    # n'est écrit, comme `sous_filtre.description`.
+    description = Column(String, nullable=False, default="")
 
     # "achat" | "vente" | "transfert" (constants.TypeOperationPlacement). Une
     # chaîne et non une FK : ces trois valeurs sont câblées dans le code de
@@ -1059,6 +1192,55 @@ class RegleImportPlacement(Base):
 
     compte_autre = relationship("Compte")
     type_titre = relationship("TypeTitre")
+
+
+class InteretPercu(Base):
+    """Un versement d'intérêts REÇU, tel que le relevé l'annonce (migration
+    0052, extension « Intérêts perçus »).
+
+    SAISI, ET NON CALCULÉ. La version précédente de cette extension partait d'un
+    taux annuel et d'une fréquence, et reconstituait les intérêts en découpant
+    le temps en périodes sans mouvement. Le calcul était juste, et c'était son
+    problème : il ne pouvait l'être que si l'app connaissait TOUS les mouvements
+    du compte, à leur date exacte, depuis l'ouverture. Un livret ouvert avant la
+    première ligne importée, un taux qui change en cours d'année (le Livret A
+    l'a fait deux fois en 2025), une banque qui arrondit autrement — et le
+    chiffre affiché diverge du relevé sans que rien ne dise lequel croire. La
+    banque, elle, ANNONCE le montant : le saisir prend dix secondes et vaut
+    n'importe quelle reconstitution.
+
+    UN CALCUL D'AFFICHAGE MALGRÉ TOUT : aucun solde, aucun KPI, aucune
+    projection du noyau ne lit cette table, et rien n'est jamais écrit en
+    opération. Si l'intérêt doit bouger le solde, c'est que le relevé le porte —
+    il entrera donc par l'import, comme n'importe quelle autre ligne. Une base
+    dont l'extension est éteinte se comporte exactement comme si elle n'existait
+    pas.
+
+    Dans le noyau bien que l'écran soit dans l'extension : une extension
+    n'emporte jamais son schéma. L'éteindre masque l'écran et garde les
+    montants.
+    """
+
+    __tablename__ = "interet_percu"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    compte_id = Column(Integer, ForeignKey("compte.id", ondelete="CASCADE"), nullable=False)
+    # UNE MONNAIE PAR LIGNE, comme partout : l'app ne connaît aucun taux de
+    # change et n'additionne jamais deux devises. Un compte multi-devises reçoit
+    # donc une ligne par devise.
+    monnaie_id = Column(Integer, ForeignKey("monnaie.id"), nullable=False)
+    # La date du relevé. C'est par elle que les lignes se regroupent par année.
+    date = Column(Date, nullable=False)
+    # Strictement positif (contrainte en base) : un intérêt PERÇU est une
+    # entrée. Zéro se dit en ne saisissant rien, et un négatif serait des frais.
+    montant = Column(Float, nullable=False)
+    # Texte libre, jamais lu par un calcul — « intérêts 2025 », « prime de
+    # fidélité ». Non nullable et vide par défaut, comme les autres notes du
+    # schéma : un NULL aurait ajouté un second cas à tester dans chaque écran.
+    libelle = Column(String, nullable=False, default="")
+
+    compte = relationship("Compte")
+    monnaie = relationship("Monnaie")
 
 
 class NoteDashboard(Base):

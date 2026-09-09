@@ -122,3 +122,78 @@
   color: var(--text-muted);
   font-size: 0.85rem;
 }
+
+/* ---------- La découpe qu'une règle impose ---------- */
+/* Une part = une catégorie + une formule. Même grille que les conditions
+   juste au-dessus, pour que les deux listes se lisent d'un seul balayage. */
+.regle-decoupe-part {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 0.5rem;
+  align-items: center;
+  margin-bottom: 0.4rem;
+}
+
+.regle-decoupe-part .danger {
+  min-width: 0;
+  padding: 0.3rem 0.6rem;
+  line-height: 1;
+}
+
+/* La formule se lit comme du code : chiffres et parenthèses alignés, pour
+   qu'une erreur de saisie se voie. */
+.regle-decoupe-formule {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 0.9rem;
+}
+
+/* ---------- Les mots-clés d'une condition ---------- */
+/*
+ * C'EST L'ÉDITEUR DE MOTS-CLÉS DU NOYAU, celui du vocabulaire des colonnes
+ * « Sens » et « État » de l'import : mêmes classes, même comportement, même
+ * geste à apprendre. Il arrive avec son habillage de CARTE — fond, bordure,
+ * marges — qui a du sens quand il occupe un bloc à lui, et aucun quand il est
+ * un champ parmi d'autres dans une rangée de condition. On le déshabille ici,
+ * et rien d'autre : les jetons, le « + » et le menu gardent leur style.
+ */
+.regle-condition-mots {
+  flex: 1;
+  min-width: 16rem;
+}
+
+.regle-condition-mots .import-vocabulaire-champ {
+  margin: 0;
+  padding: 0;
+  background: none;
+  border: none;
+  border-radius: 0;
+}
+
+/* La saisie prend la largeur disponible, le menu « Retirer » reste au bord
+   droit : la rangée d'une condition est étroite, un champ borné à 16 rem y
+   laissait un vide au milieu. */
+.regle-condition-mots .import-vocabulaire-saisie {
+  flex: 1;
+}
+
+.regle-condition-mots .import-vocabulaire-saisie input[type="text"] {
+  max-width: none;
+}
+
+/* Les jetons sont collés sous la barre de saisie, sans le retrait qu'ils
+   prennent dans un bloc de vocabulaire. */
+.regle-condition-mots .import-vocabulaire-jetons {
+  margin-top: 0.35rem;
+}
+
+/* Une condition qui porte des mots-clés est plus haute qu'une condition
+   numérique : ses champs s'alignent en HAUT, sans quoi les boutons de la
+   rangée flotteraient au milieu des jetons. */
+.regle-condition:has(.regle-condition-mots) {
+  align-items: flex-start;
+}
+
+.regle-condition:has(.regle-condition-mots) > select,
+.regle-condition:has(.regle-condition-mots) > .danger {
+  margin-top: 0.1rem;
+}

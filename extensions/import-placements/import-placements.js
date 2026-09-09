@@ -1721,6 +1721,14 @@ function renderImplRegles() {
           ${escapeHtml(regle.nom)}
           ${regle.actif ? "" : `<span class="badge-aucun">${t("inactive")}</span>`}
         </div>
+        ${
+          // La note de la règle, quand elle en porte une : au-dessus des
+          // conditions, c'est ce qu'on lit d'abord pour reconnaître la bonne
+          // règle. Même rendu que côté bancaire (cf. extensions/regles).
+          (regle.description || "").trim()
+            ? `<div class="regle-carte-description">${escapeHtml(regle.description.trim())}</div>`
+            : ""
+        }
         <div class="regle-carte-conditions">${t("Si")} ${implResumeRegle(regle)}</div>
         <div class="regle-carte-action">→ ${implActionRegleHtml(regle)}</div>
       </div>
@@ -1935,6 +1943,9 @@ function ouvrirEditeurImplRegle(regle = null) {
     : t("Nouvelle règle");
   document.getElementById("impl-regle-id").value = regle ? regle.id : "";
   document.getElementById("impl-regle-nom").value = regle ? regle.nom : "";
+  document.getElementById("impl-regle-description").value = regle
+    ? regle.description || ""
+    : "";
   document.getElementById("impl-regle-connecteur").value = regle
     ? regle.conditions.operateur
     : "ET";
@@ -2086,6 +2097,7 @@ document.getElementById("btn-impl-regle-enregistrer").addEventListener("click", 
 
   const payload = {
     nom,
+    description: document.getElementById("impl-regle-description").value.trim(),
     conditions: {
       operateur: document.getElementById("impl-regle-connecteur").value,
       groupes: implRegleBrouillonGroupes,

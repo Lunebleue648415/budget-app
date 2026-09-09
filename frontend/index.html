@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <title>Budget App</title>
-  <link rel="stylesheet" href="style.css?v=84" />
+  <link rel="stylesheet" href="style.css?v=92" />
 </head>
 <body>
   <!-- Le titre ET les outils globaux (langue, recherche) restent COLLÉS
@@ -73,6 +73,42 @@
 
   <div id="toast-container"></div>
 
+  <!-- OÙ RANGER LA BASE — écran de premier démarrage, BLOQUANT.
+       Il n'a pas de bouton pour fermer, et c'est délibéré : tant que la base
+       vit dans le dossier de l'application, la prochaine mise à jour l'efface
+       (systématiquement sur macOS, où elle est DANS le bundle .app). Une
+       fenêtre qu'on peut écarter d'un clic serait écartée, et le problème ne
+       se manifesterait qu'au moment où il est trop tard pour le corriger.
+       Affichée par app.js quand le serveur répond `configuration_requise`
+       (cf. backend/app/database.py::configuration_requise), jamais autrement. -->
+  <div id="modale-bdd" class="modale-fond" style="display:none" role="presentation">
+    <div class="modale" role="dialog" aria-modal="true" aria-labelledby="modale-bdd-titre">
+      <h2 id="modale-bdd-titre">Où ranger tes données ?</h2>
+      <p class="modale-texte">
+        Tes comptes et tes opérations vivent dans un seul fichier. Il est pour l'instant
+        <strong>dans le dossier de l'application</strong> — l'endroit qu'une mise à jour
+        remplace. Choisis-lui une place ailleurs : ce sera fait une fois pour toutes.
+      </p>
+      <label class="full-width">Emplacement du fichier
+        <input type="text" id="modale-bdd-chemin" />
+      </label>
+      <p class="hint" id="modale-bdd-explication"></p>
+      <div id="modale-bdd-erreur" class="import-avertissements" style="display:none"></div>
+      <div class="modale-actions">
+        <!-- MASQUÉ PAR DÉFAUT : le sélecteur du système n'existe que dans
+             l'application de bureau (window.pywebview.api, cf. ApiBureau dans
+             desktop/app_desktop.py). Ouverte dans un navigateur pendant le
+             développement, la page n'a pas de quoi choisir un chemin complet —
+             montrer un bouton qui n'ouvrirait rien serait pire que pas de
+             bouton. app.js le révèle quand l'API répond présente. -->
+        <button type="button" id="btn-modale-bdd-parcourir" style="display:none">Parcourir…</button>
+        <button type="button" class="primary" id="btn-modale-bdd-valider">
+          Ranger mes données ici
+        </button>
+      </div>
+    </div>
+  </div>
+
   <!-- Signale les extensions trouvées dans le dossier `extensions/` au
        lancement. L'application est livrée SANS aucune extension : en trouver
        est donc un événement, qui mérite d'être dit une fois plutôt que laissé
@@ -128,7 +164,12 @@
           </div>
         </div>
         <div class="kpi-card">
-          <div class="kpi-label" id="kpi-variation-label">Variation du mois</div>
+          <!-- LE MOUVEMENT BRUT DES COMPTES, et rien d'autre : tout ce qui est
+               passé, à sa date et pour son montant, sans étaler ni retrancher
+               (cf. services/soldes.get_variation_brute). C'est la question
+               qu'on se pose devant un relevé ; ce que le mois COÛTE se lit plus
+               bas, dans « Total Dépenses ». -->
+          <div class="kpi-label" id="kpi-variation-label">Variation du mois<i class="info-bulle" tabindex="0" data-info="De combien les comptes courants ont bougé sur la période. Tout compte à sa date et pour son montant : une dépense amortie en entier, une dépense remboursable sans déduire ce qu'on rendra. Virements internes exclus.">i</i></div>
           <div class="kpi-valeur" id="kpi-variation">-</div>
         </div>
         <div class="kpi-card">
@@ -137,8 +178,12 @@
         </div>
       </div>
 
-      <h3>Répartition des avoirs<i class="info-bulle" tabindex="0" data-info="Agrégé par type de comptes">i</i></h3>
-      <div id="dashboard-repartition-comptes"></div>
+      <!-- LA RÉPARTITION DES AVOIRS A DÉMÉNAGÉ, page « Vue globale des
+           comptes ». Elle répartit un patrimoine ENTRE DES COMPTES : sa place
+           est au-dessus des cartes de compte qu'elle résume, et non au milieu
+           d'un écran qui parle du mois en cours. Elle y gagne au passage ce que
+           le dashboard ne pouvait pas lui donner — le choix de sa monnaie,
+           indépendant de l'onglet des KPI. -->
 
       <h3>Dépenses par catégorie — <span id="dashboard-periode-libelle"></span></h3>
       <!-- Mêmes flèches que la page Opérations : ▲ regroupe le mois dans son
@@ -150,31 +195,44 @@
         <div class="periode-niveaux">
           <div class="sous-onglets" id="dashboard-periode-annees"></div>
           <div class="sous-onglets sous-onglets-mois" id="dashboard-periode-mois"></div>
+          <!-- UN CRAN PLUS BAS : les semaines du mois choisi. Repliées, parce
+               qu'on regarde un mois neuf fois sur dix ; la petite flèche les
+               déplie, et l'histogramme au-dessous devient celui de la semaine
+               choisie — le MÊME graphe, pas un second. Recliquer la semaine
+               active rend l'histogramme au mois entier.
+
+               « Moyenne » ferme la rangée : elle répond à ce qu'une semaine
+               seule laisse ouvert — celle-ci est-elle une semaine ordinaire ? -->
+          <div class="periode-semaines" id="dashboard-periode-semaines-ligne">
+            <button type="button" class="periode-chevron" id="btn-dashboard-semaines"
+                    aria-expanded="false" aria-controls="dashboard-periode-semaines"
+                    title="Détailler par semaine"></button>
+            <div class="sous-onglets sous-onglets-mois" id="dashboard-periode-semaines" hidden></div>
+          </div>
         </div>
       </div>
 
-      <!-- Entrées, sorties et leur différence : posés ICI, sous le sélecteur de
-           période, et non parmi les cartes du haut. C'est la même question que
-           l'histogramme pose — « qu'est-ce que ce mois a coûté ? » — et les
-           trois chiffres doivent suivre le mois qu'on vient de choisir, sans
-           avoir à remonter la page pour les lire. Les virements internes n'y
-           entrent jamais (cf. services/soldes.get_flux_periode). -->
+      <!-- CE QUE LA PÉRIODE COÛTE ET RAPPORTE, posé ICI et non parmi les cartes
+           du haut : c'est la question de l'histogramme juste en dessous, et les
+           deux chiffres doivent suivre le mois qu'on vient de choisir sans
+           qu'on ait à remonter la page.
+
+           PLUS DE « DIFFÉRENCE » : elle répétait, à un signe près, la variation
+           du mois affichée en haut, et laissait croire à deux mesures là où il
+           n'y en a qu'une. Ce qui reste, ce sont les deux totaux que
+           l'histogramme détaille (cf. services/soldes.get_flux_periode). -->
       <div class="flux-periode">
         <div class="flux-carte">
-          <div class="flux-label">Total entrées</div>
+          <div class="flux-label">Total Entrées<i class="info-bulle" tabindex="0" data-info="Ce que la période rapporte, virements internes exclus. Un prêt reçu n'y entre pas : il faudra le rendre. Reste sur le mois entier, semaine dépliée ou non.">i</i></div>
           <div class="flux-valeur positif" id="kpi-total-entrees">-</div>
         </div>
         <div class="flux-carte">
-          <div class="flux-label">Total sorties</div>
+          <div class="flux-label">Total Dépenses<i class="info-bulle" tabindex="0" data-info="Ce que la période coûte, et non ce qui sort du compte : une dépense amortie ne compte que pour sa part du mois, une remboursable pour le reste à charge. Virements internes exclus. Reste sur le mois entier, semaine dépliée ou non.">i</i></div>
           <div class="flux-valeur negatif" id="kpi-total-sorties">-</div>
-        </div>
-        <div class="flux-carte">
-          <div class="flux-label">Différence<i class="info-bulle" tabindex="0" data-info="Les entrées moins les sorties sur la période, virements internes exclus.">i</i></div>
-          <div class="flux-valeur" id="kpi-flux-difference">-</div>
         </div>
       </div>
 
-      <div id="dashboard-histogramme"></div>
+      <div id="dashboard-histogramme" class="histogramme-cadre"></div>
 
       <!-- Bloc-notes libre : aucune structure, aucune sémantique. Il grandit
            avec son contenu (cf. ajusterHauteurNoteDashboard) parce qu'une note
@@ -217,6 +275,25 @@ relancer Marie pour les 40 € du restaurant"></textarea>
       </div>
 
       <div id="sous-section-comptes-globale-vue" class="sous-section active">
+        <!-- LA RÉPARTITION DES AVOIRS, en tête : elle résume d'un cercle ce que
+             les cartes détaillent compte par compte en dessous.
+
+             DEUX RÉGLAGES À ELLE, et c'est ce qui a motivé le déménagement.
+             Cette page ne raisonne pas par monnaie (chaque carte montre tous
+             ses soldes), alors qu'un camembert, lui, ne peut répartir qu'UNE
+             monnaie — il lui fallait donc son propre sélecteur plutôt que
+             l'onglet d'une autre page. La case d'agrégation, elle, est posée
+             par l'extension « Monnaies » dans le conteneur prévu à côté ; sans
+             elle, il n'y a rien à agréger et rien ne s'affiche. -->
+        <h3>Répartition des avoirs<i class="info-bulle" tabindex="0" data-info="La part du total des avoirs posée sur chaque type de compte, dans la monnaie choisie. Solde RÉEL, titres détenus compris — pas le prévisionnel.">i</i></h3>
+        <div class="repartition-barre">
+          <label for="globale-repartition-monnaie">Monnaie
+            <select id="globale-repartition-monnaie"></select>
+          </label>
+          <div id="globale-repartition-options"></div>
+        </div>
+        <div id="globale-repartition-comptes"></div>
+
         <h3>Comptes courants</h3>
         <div class="comptes-grid" id="globale-comptes-courants"></div>
 
@@ -489,6 +566,20 @@ relancer Marie pour les 40 € du restaurant"></textarea>
         <label id="operation-monnaie-recue-bloc" style="display:none">Monnaie reçue
           <select id="operation-monnaie-recue"></select>
         </label>
+        <!-- LES FRAIS COMPRIS DANS LE MONTANT, séparés pour être relus et
+             corrigés. Affichés SEULEMENT quand l'opération en porte : une
+             ligne sur cent en a, et deux champs de plus sur chaque saisie
+             ordinaire coûteraient plus qu'ils ne rendent. Le montant affiché
+             au-dessus passe alors HORS FRAIS, et les deux se recomposent à
+             l'enregistrement (cf. app.js, § « Frais d'une opération »). -->
+        <label id="operation-frais-bloc" style="display:none">
+          <span>Frais</span><i class="info-bulle" tabindex="0" data-info="Les frais que la banque a prélevés, déjà compris dans le montant : ajoutés à ce qui sort, retranchés de ce qui entre. Le montant au-dessus est donc affiché hors frais, et les deux se recomposent à l'enregistrement.">i</i>
+          <input type="number" step="0.01" min="0" id="operation-frais" />
+        </label>
+        <label id="operation-monnaie-frais-bloc" style="display:none">
+          <span>Monnaie des frais</span><i class="info-bulle" tabindex="0" data-info="La devise des frais dit à quel montant ils s'appliquent : sur un virement entre deux monnaies, des frais dans la monnaie envoyée grèvent ce qui part, dans la monnaie reçue ce qui arrive.">i</i>
+          <select id="operation-monnaie-frais"></select>
+        </label>
         <label>Date
           <input type="date" id="operation-date" required />
         </label>
@@ -507,6 +598,27 @@ relancer Marie pour les 40 € du restaurant"></textarea>
         <label id="operation-categorie-bloc">Catégorie
           <select id="operation-categorie"></select>
         </label>
+
+        <!-- DÉCOUPE : répartir le montant entre plusieurs catégories. Une seule
+             opération (une ligne au relevé, un mouvement de compte) qui compte
+             dans plusieurs barres de l'histogramme. Réservée aux opérations
+             classiques : les autres types portent une catégorie imposée, un
+             montant dû ou une contrepartie, que la découpe ne saurait pas
+             répartir (cf. crud.erreur_decoupes). -->
+        <label id="operation-decoupee-bloc">
+          <input type="checkbox" id="operation-decoupee" /> Découper entre plusieurs catégories<i class="info-bulle" tabindex="0" data-info="Une seule opération, plusieurs catégories : un plein de courses dont une part de produits ménagers. Le total des parts doit valoir le montant de l'opération.">i</i>
+        </label>
+        <div id="operation-decoupe-bloc" class="full-width" style="display:none">
+          <div id="operation-decoupe-parts"></div>
+          <div class="decoupe-pied">
+            <button type="button" id="operation-decoupe-ajouter">Ajouter une part</button>
+            <!-- Le compteur du garde-fou : ce qui est réparti, et ce qui reste
+                 à placer. Rouge tant que les deux ne coïncident pas — le
+                 serveur refuse alors l'enregistrement (400), autant le dire
+                 pendant la saisie plutôt qu'après. -->
+            <span id="operation-decoupe-total" class="decoupe-total"></span>
+          </div>
+        </div>
 
         <label id="operation-statut-bloc">Statut
           <select id="operation-statut" required></select>
@@ -616,12 +728,18 @@ relancer Marie pour les 40 € du restaurant"></textarea>
       <div class="sous-onglets sous-onglets-deux-groupes" id="parametres-sous-nav">
         <div class="sous-onglets-groupe" id="parametres-sous-nav-gauche">
           <button type="button" data-sous-section="parametres-comptes" class="active">Comptes</button>
-          <button type="button" data-sous-section="parametres-categories">Catégories</button>
+          <button type="button" data-sous-section="parametres-categories"><img class="onglet-logo" src="/img/category_logo.svg" alt="" width="15" height="15" />Catégories</button>
         </div>
         <div class="sous-onglets-groupe" id="parametres-sous-nav-droite">
           <button type="button" data-sous-section="parametres-correspondances">Correspondances</button>
-          <button type="button" data-sous-section="parametres-import">Import</button>
-          <button type="button" data-sous-section="parametres-extensions">Extensions</button>
+          <!-- LE LOGO EST DANS LE BOUTON D'ONGLET, là où l'œil cherche l'écran
+               à ouvrir — pas dans le titre de la page, qu'on ne lit qu'une fois
+               arrivé. Le `<img>` précède le texte, que la traduction du DOM
+               statique remplace sans y toucher (c'est un nœud de texte à
+               part). -->
+          <button type="button" data-sous-section="parametres-import"><img class="onglet-logo" src="/img/import_logo.svg" alt="" width="15" height="15" />Import</button>
+          <button type="button" data-sous-section="parametres-extensions"><img class="onglet-logo" src="/img/extensions_logo.svg" alt="" width="15" height="15" />Extensions</button>
+          <button type="button" data-sous-section="parametres-bdd"><img class="onglet-logo" src="/img/database_logo.svg" alt="" width="15" height="15" />Base de données</button>
         </div>
       </div>
 
@@ -958,11 +1076,25 @@ relancer Marie pour les 40 € du restaurant"></textarea>
       <div id="import-avertissements" class="import-avertissements" style="display:none"></div>
 
       <div id="import-apercu-fichier-bloc" style="display:none">
-        <h3>Le fichier tel qu'il est</h3>
+        <!-- Le titre et le bouton de relecture sur une ligne : la relecture est
+             une action SUR ce tableau, elle doit être là où il commence. -->
+        <div class="apercu-fichier-entete">
+          <h3>Le fichier tel qu'il est</h3>
+          <button type="button" id="btn-import-apercu-relire"
+                  title="Relire le fichier avec la configuration actuelle"></button>
+        </div>
         <p class="hint">
-          Les colonnes colorées sont celles que l'app va lire, les grises sont ignorées. Si une
-          couleur ne tombe pas en face des bonnes données, corrige les numéros dans
-          « Configuration du fichier » au-dessus.
+          Les colonnes colorées sont celles que l'app va lire, les grises sont ignorées. Deux
+          façons de corriger un décalage : glisser un en-tête sur un autre pour échanger les
+          deux colonnes, ou saisir les numéros dans « Configuration du fichier » au-dessus.
+        </p>
+        <!-- Ce qui manque au tableau quand les en-têtes viennent de bouger : le
+             fichier n'a pas encore été relu, les lignes résolues plus bas
+             décrivent donc la lecture d'avant. -->
+        <p class="hint apercu-fichier-alerte" id="import-apercu-fichier-alerte" style="display:none">
+          Les colonnes ont changé depuis la dernière lecture. Relire le fichier pour voir ce que
+          l'import donnera, puis « Enregistrer la configuration » pour garder cet ordre dans le
+          preset.
         </p>
         <div class="apercu-fichier-defilement">
           <table id="import-apercu-fichier-table"></table>
@@ -1189,6 +1321,52 @@ relancer Marie pour les 40 € du restaurant"></textarea>
         <div id="extensions-erreurs" class="import-avertissements" style="display:none"></div>
         <div id="extensions-liste"></div>
       </div>
+
+      <!-- BASE DE DONNÉES — venue de `extensions-dev/base-de-donnees/`, qui
+           n'existe plus. Ce panneau était un outil de développeur tant que
+           l'emplacement par défaut de la base était sûr ; il ne l'est pas (il
+           vit dans le dossier que la mise à jour remplace), et choisir où
+           ranger ses données est devenu la seule chose qui les protège.
+           Cf. backend/app/routers/parametres_base.py. -->
+      <div id="sous-section-parametres-bdd" class="sous-section">
+        <h3>Base de données<i class="info-bulle" tabindex="0" data-info="L'application lit et écrit dans un seul fichier .db. Tu choisis où il vit ; l'emplacement est retenu d'un lancement à l'autre.">i</i></h3>
+
+        <div id="bdd-alerte-risque" class="import-avertissements" style="display:none"></div>
+
+        <div class="stat-box">
+          <div class="hint">Base actuelle</div>
+          <div id="bdd-chemin-actuel" style="font-variant-numeric: tabular-nums;">-</div>
+          <div id="bdd-schema" class="hint">-</div>
+        </div>
+
+        <form id="form-bdd" class="full-width">
+          <label class="full-width">Chemin complet du fichier .db
+            <input type="text" id="bdd-chemin" placeholder="C:\chemin\vers\ma_base.db" />
+          </label>
+          <p class="hint full-width">
+            Le navigateur ne transmet jamais le chemin complet d'un fichier choisi via « Parcourir »
+            (limite de sécurité) : ce bouton ne pré-remplit que le nom du fichier, complète le
+            dossier à la main.
+          </p>
+          <input type="file" id="bdd-fichier" accept=".db,.sqlite,.sqlite3" hidden />
+          <div class="actions full-width">
+            <button type="button" id="btn-bdd-parcourir">Parcourir…</button>
+            <button type="submit" class="primary">Basculer sur ce fichier</button>
+            <button type="button" id="btn-bdd-installer">Créer / déplacer ici</button>
+          </div>
+        </form>
+
+        <p class="hint">
+          « Basculer » exige un fichier existant. « Créer / déplacer ici » accepte un chemin neuf :
+          il y déplace la base ouverte si elle est encore dans le dossier de l'application, et en
+          crée une vierge sinon.
+        </p>
+        <p class="hint">
+          Une base restée à une version de schéma antérieure est mise à jour à la bascule, après
+          copie horodatée à côté du fichier d'origine : une application neuve ne sait pas lire une
+          base ancienne, et échouerait sinon sur ses pages principales sans dire pourquoi.
+        </p>
+      </div>
     </section>
   </main>
 
@@ -1198,8 +1376,8 @@ relancer Marie pour les 40 € du restaurant"></textarea>
        dans switchSection, et l'appelle au démarrage. Il ne fait que DÉFINIR le
        mécanisme — le chargement effectif part de app.js, une fois `apiFetch`
        et `t()` disponibles. -->
-  <script src="i18n.js?v=33"></script>
-  <script src="extensions.js?v=10"></script>
-  <script src="app.js?v=106"></script>
+  <script src="i18n.js?v=39"></script>
+  <script src="extensions.js?v=14"></script>
+  <script src="app.js?v=115"></script>
 </body>
 </html>

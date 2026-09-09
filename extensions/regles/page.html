@@ -64,6 +64,15 @@
       <input type="text" id="regle-nom" placeholder="ex. Prêts reçus" />
     </div>
 
+    <!-- LA NOTE : pourquoi cette règle existe, ce que le nom et les conditions
+         ne disent pas. Jamais lue par l'app — ni filtrée, ni comparée, ni
+         déclenchée (cf. migration 0050). Un <textarea> et non un <input> :
+         c'est une phrase ou trois, pas une étiquette. -->
+    <div class="regle-champ-ligne">
+      <label for="regle-description">Description<i class="info-bulle" tabindex="0" data-info="Note libre : pourquoi cette règle existe, quel relevé l'a rendue nécessaire, ce qu'il faudra vérifier si elle cesse de mordre. Jamais lue par l'application.">i</i></label>
+      <textarea id="regle-description" rows="2" placeholder="ex. la banque écrit « VIR RECU M DUPONT » pour les remboursements de Paul"></textarea>
+    </div>
+
     <h4>Conditions</h4>
     <p class="hint">
       Les groupes se combinent entre eux ; à l'intérieur d'un groupe, les conditions se
@@ -103,6 +112,26 @@
       <select id="regle-categorie"><option value="">— ne pas changer —</option></select>
     </div>
     <p class="hint" id="regle-categorie-imposee" style="display:none"></p>
+    <!-- DÉCOUPE : la règle ne pose plus une catégorie mais une répartition.
+         Une règle est écrite une fois pour des lignes dont elle ignore le
+         montant : chaque part porte donc une FORMULE et non un nombre. -->
+    <label class="import-option-ligne" id="regle-decoupee-bloc">
+      <input type="checkbox" id="regle-decoupee" />
+      Découper entre plusieurs catégories<i class="info-bulle" tabindex="0" data-info="La règle répartit le montant de la ligne entre plusieurs catégories, au lieu d'en poser une seule. Réservé aux opérations classiques.">i</i>
+    </label>
+    <div id="regle-decoupe-bloc" style="display:none">
+      <div id="regle-decoupe-parts"></div>
+      <div class="actions">
+        <button type="button" id="btn-regle-decoupe-ajouter">+ Ajouter une part</button>
+      </div>
+      <p class="hint">
+        Chaque part dit combien elle prend. On peut écrire un nombre (50), un
+        pourcentage (30%), une opération (montant - 50), ou utiliser min et max
+        — par exemple min(montant; 50) pour « au plus 50 € ». Le mot reste donne
+        à une part tout ce que les autres n'ont pas pris ; une seule part peut le
+        porter, et la somme doit valoir le montant de la ligne.
+      </p>
+    </div>
     <!-- Un virement décrit DEUX comptes, et le relevé n'en nomme qu'un.
          Sans ce second compte, chaque ligne reconnue par la règle doit
          être reprise à la main dans l'aperçu avant de pouvoir être

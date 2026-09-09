@@ -51,6 +51,17 @@
 
     <div class="projet-totaux" id="projet-detail-totaux"></div>
 
+    <!-- L'HISTOGRAMME DU PROJET : le même graphe que celui du dashboard, sur
+         les seules opérations que le projet regroupe. Le total dit ce que le
+         voyage a coûté ; lui dit en quoi — hébergement, restaurants,
+         transports — ce qu'aucune somme unique ne peut montrer.
+
+         Rempli par projets.js, une section par monnaie (l'app n'en additionne
+         jamais deux). Vide tant que le projet n'a aucune sortie : un cadre sans
+         barre n'apprendrait rien. -->
+    <h4 id="projet-histogramme-titre" style="display:none">Répartition par catégorie<i class="info-bulle" tabindex="0" data-info="Les sorties du projet, réparties par catégorie — virements sortants compris, comme dans le total ci-dessus. Les entrées n'y figurent pas : elles se lisent dans le total des entrées.">i</i></h4>
+    <div id="projet-histogramme"></div>
+
     <div class="actions">
       <button type="button" class="primary" id="btn-projet-ajouter-operations">
         + Ajouter des opérations

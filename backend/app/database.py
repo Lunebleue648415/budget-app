@@ -28,21 +28,95 @@ def _dossier_donnees_par_defaut() -> Path:
 
 
 _DEFAULT_DEV_DIR = _dossier_donnees_par_defaut()
-_DEFAULT_DEV_DIR.mkdir(parents=True, exist_ok=True)
+# `exist_ok` NE SUFFIT PAS : l'emplacement peut être en lecture seule (bundle
+# macOS lancé depuis la quarantaine, donc « translocated » sur un montage en
+# lecture seule ; application posée dans /Applications ou Program Files). Sans
+# cette garde, l'import du module échoue et l'application meurt avant d'ouvrir
+# sa fenêtre — alors qu'elle a désormais tout ce qu'il faut pour demander à
+# l'utilisateur où ranger sa base (cf. configuration_requise). Même
+# raisonnement que extensions.preparer_dossiers.
+try:
+    _DEFAULT_DEV_DIR.mkdir(parents=True, exist_ok=True)
+except OSError:
+    pass
 _DEFAULT_DEV_DB_PATH = _DEFAULT_DEV_DIR / "budget_dev.db"
 
-# Utilisés par alembic (migrations, cf. alembic/env.py) : résolution statique
-# à l'import, indépendante de la bascule de base à chaud ci-dessous — une
-# migration lancée sans BUDGET_DB_PATH cible donc toujours la base de dev,
-# jamais la base actuellement sélectionnée par l'utilisateur dans l'app.
-DATABASE_PATH = Path(os.environ.get("BUDGET_DB_PATH", str(_DEFAULT_DEV_DB_PATH)))
-SQLALCHEMY_DATABASE_URL = f"sqlite:///{DATABASE_PATH.as_posix()}"
-
 # Chemin de la base de test/dev, exposé pour que l'app puisse toujours y
-# revenir facilement (bouton "Revenir à la base de test") — jamais mémorisé
-# pour la base personnelle de l'utilisateur, qui ne doit se retrouver associée
-# à rien de persistant au-delà de la session en cours.
+# revenir facilement (bouton "Revenir à la base de test").
+#
+# C'est aussi l'ANCRE DE TOUT CE QUI N'EST PAS DES DONNÉES et vit à côté de
+# l'exécutable : `extensions.json` (état des extensions) et `erreur.log`. Ces
+# deux-là ne suivent PAS la base quand elle déménage — ils décrivent
+# l'installation, pas les finances.
 DEV_DB_PATH = _DEFAULT_DEV_DB_PATH.resolve()
+
+
+def _chemin_impose_par_environnement() -> Path | None:
+    """BUDGET_DB_PATH, quand elle est posée. Elle PRIME SUR TOUT — sur le choix
+    mémorisé comme sur le défaut — et désactive au passage la configuration
+    forcée : c'est par elle que passent les tests et les bacs à sable, qui
+    n'ont rien à demander à personne."""
+    valeur = os.environ.get("BUDGET_DB_PATH")
+    return Path(valeur).expanduser() if valeur else None
+
+
+# Renseigné quand un chemin ÉTAIT mémorisé mais que le fichier a disparu :
+# disque externe débranché, dossier renommé, fichier supprimé. L'application
+# repart alors sur son emplacement par défaut, mais le panneau « Base de
+# données » le dit en toutes lettres — c'est la seule chose qui distingue
+# « ta base n'est pas là où tu l'avais mise » de « tu n'as jamais rien saisi ».
+BASE_MEMORISEE_INTROUVABLE: Path | None = None
+
+
+def _resoudre_chemin_demarrage() -> Path:
+    """La base sur laquelle l'application s'ouvre, dans l'ordre de priorité :
+    la variable d'environnement, puis le choix mémorisé au dernier passage par
+    le panneau « Base de données », puis l'emplacement par défaut.
+
+    LE DÉFAUT EST À RISQUE et c'est assumé : il vit dans le dossier de
+    l'application, qu'une mise à jour remplace (cf. chemin_a_risque). Y
+    retomber n'est pas un accident silencieux — c'est exactement la condition
+    qui déclenche la demande de configuration au démarrage.
+
+    UN CHEMIN MÉMORISÉ DONT LE FICHIER A DISPARU NE SERT PAS DE CIBLE. SQLite
+    crée le fichier qu'on lui désigne, et les migrations le rempliraient d'un
+    schéma vierge : l'utilisateur retrouverait une application parfaitement
+    fonctionnelle et parfaitement vide, à l'endroit exact où il croyait avoir
+    ses données — et le vrai fichier, sur le disque débranché, n'aurait plus
+    rien pour le rattacher à l'application. On repart donc du défaut, en
+    laissant une trace de ce qu'on cherchait."""
+    global BASE_MEMORISEE_INTROUVABLE
+
+    impose = _chemin_impose_par_environnement()
+    if impose is not None:
+        return impose
+    # LE CHOIX MÉMORISÉ NE VAUT QUE POUR L'APPLICATION PACKAGÉE. En
+    # développement, la base est celle du dépôt, et `alembic upgrade` lancé à la
+    # main depuis `backend/` doit continuer de la viser — sinon il migrerait la
+    # base PERSONNELLE de la machine de développement, sans le dire et sans
+    # qu'on l'ait demandé, du seul fait qu'un fichier de configuration traîne
+    # dans le profil. C'est exactement le genre de bascule implicite que le
+    # module refuse depuis toujours.
+    if not getattr(sys, "frozen", False) and os.environ.get("BUDGET_FORCER_CHOIX_BASE") != "1":
+        return _DEFAULT_DEV_DB_PATH
+    from . import config_utilisateur
+
+    memorise = config_utilisateur.chemin_base_memorise()
+    if memorise is None:
+        return _DEFAULT_DEV_DB_PATH
+    if memorise.is_file():
+        return memorise
+    BASE_MEMORISEE_INTROUVABLE = memorise
+    return _DEFAULT_DEV_DB_PATH
+
+
+# Utilisés par alembic (migrations, cf. alembic/env.py) : résolution statique à
+# l'import, indépendante de la bascule de base à chaud ci-dessous. Elle suit
+# désormais le choix mémorisé, sans quoi l'application de bureau migrerait au
+# démarrage une base par défaut que plus personne n'ouvre, en laissant la vraie
+# à son ancien schéma (cf. desktop/app_desktop.py::_appliquer_migrations).
+DATABASE_PATH = _resoudre_chemin_demarrage()
+SQLALCHEMY_DATABASE_URL = f"sqlite:///{DATABASE_PATH.as_posix()}"
 
 Base = declarative_base()
 
@@ -179,6 +253,149 @@ def migrer_si_necessaire(chemin: Path) -> tuple[Path | None, str | None]:
     return sauvegarde, revision
 
 
+def dossier_application() -> Path:
+    """Le dossier qu'une mise à jour REMPLACE : celui de l'exécutable en
+    application packagée, la racine du dépôt en développement."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return _BACKEND_DIR.parent
+
+
+def chemin_a_risque(chemin: Path) -> bool:
+    """Vrai quand la base vit DANS le dossier de l'application.
+
+    C'est le seul emplacement dangereux, et il l'est de deux façons selon le
+    système. Sur Windows et Linux, l'archive se décompresse par-dessus
+    l'ancienne : `data/` survit si l'utilisateur fusionne, disparaît s'il
+    supprime d'abord l'ancien dossier — un coup de pile ou face à chaque mise
+    à jour. Sur macOS c'est pire et c'est systématique : la base est dans
+    `Budget App.app/Contents/MacOS/data/`, donc DANS le bundle, et le Finder
+    remplace un `.app` en entier sans jamais proposer de fusionner.
+
+    Le dossier des extensions court le même risque, mais une extension se
+    retélécharge ; une base de comptes, non."""
+    try:
+        chemin.resolve().relative_to(dossier_application())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def emplacement_propose() -> Path:
+    """L'emplacement proposé par défaut au premier démarrage.
+
+    LE DOSSIER « DOCUMENTS » PLUTÔT QU'UN DOSSIER DE CONFIGURATION SYSTÈME :
+    c'est un fichier que l'utilisateur a de bonnes raisons de vouloir
+    retrouver, copier sur une clé, mettre dans sa sauvegarde. Rangé dans
+    AppData ou Application Support, il serait à l'abri des mises à jour mais
+    introuvable pour qui le cherche — et une base qu'on ne sait pas sauvegarder
+    n'est protégée qu'à moitié."""
+    documents = Path.home() / "Documents"
+    racine = documents if documents.is_dir() else Path.home()
+    return racine / "Budget App" / "budget.db"
+
+
+def configuration_requise() -> bool:
+    """Faut-il exiger de l'utilisateur qu'il choisisse un emplacement AVANT de
+    le laisser entrer dans l'application ?
+
+    Oui dès que la base ouverte est dans le dossier de l'application : c'est le
+    cas au tout premier démarrage (aucun choix mémorisé, on est sur le défaut)
+    comme après une mise à jour qui aurait effacé la configuration. Les deux
+    situations appellent le même geste, il n'y a donc qu'une condition.
+
+    DEUX ÉCHAPPATOIRES, et elles se justifient l'une et l'autre :
+    BUDGET_DB_PATH, par où passent les tests et les bacs à sable, qui désigne
+    déjà explicitement une cible ; et le mode DÉVELOPPEMENT, où la base vit
+    dans le dépôt par construction et n'est jamais remplacée par une archive —
+    y forcer un choix ne protégerait de rien et casserait le lancement du
+    serveur de dev.
+
+    `BUDGET_FORCER_CHOIX_BASE=1` LÈVE LES DEUX, et sert exclusivement à
+    regarder cet écran sans reconstruire le bundle. Il lève aussi celle de
+    BUDGET_DB_PATH parce que c'est la seule façon de l'essayer SANS RISQUE :
+    sans elle, la seule base « à risque » disponible en développement serait
+    celle du dépôt — de vraies données, qu'un écran de mise au point n'a rien
+    à proposer de déplacer."""
+    force = os.environ.get("BUDGET_FORCER_CHOIX_BASE") == "1"
+    if not force:
+        if _chemin_impose_par_environnement() is not None:
+            return False
+        if not getattr(sys, "frozen", False):
+            return False
+    return chemin_a_risque(get_chemin_actuel())
+
+
+def installer_base(destination: str, deplacer_depuis: str | None = None) -> tuple[Path, str]:
+    """Met en place la base à l'emplacement choisi, puis y bascule l'app.
+
+    Rend (chemin, action) où `action` dit ce qui s'est passé — « ouverte »,
+    « déplacée », « créée » — parce que ces trois cas n'appellent pas le même
+    message à l'écran, et que le frontend ne peut pas le deviner : il ne sait
+    pas si le fichier existait avant sa requête.
+
+    C'EST LA SEULE FONCTION QUI CRÉE OU DÉPLACE UN FICHIER DE BASE.
+    `changer_base` s'y refuse par principe (un chemin fautif doit échouer, pas
+    fabriquer une base vide) — mais le premier démarrage a précisément besoin
+    de fabriquer quelque chose, et forcer l'utilisateur à créer un fichier
+    SQLite à la main avant de pouvoir ouvrir son budget n'aurait aucun sens."""
+    cible = Path(destination).expanduser()
+    if cible.is_dir():
+        raise ValueError(f"{cible} est un dossier : donne le chemin d'un fichier .db")
+
+    # Le fichier est déjà là : rien à fabriquer, c'est une bascule ordinaire
+    # (qui migrera le schéma au besoin). Le cas de qui retrouve sa base après
+    # une mise à jour, ou la désigne sur un disque externe.
+    if cible.is_file():
+        return changer_base(str(cible)), "ouverte"
+
+    try:
+        cible.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ValueError(f"Impossible de créer le dossier {cible.parent} : {exc}") from exc
+
+    source = Path(deplacer_depuis).expanduser() if deplacer_depuis else None
+    if source is not None and source.is_file():
+        # DÉPLACEMENT et non copie : deux fichiers identiques dont un seul est
+        # lu sont une invitation à travailler des semaines dans le mauvais, et
+        # celui qu'on laisserait derrière est justement dans le dossier que la
+        # prochaine mise à jour efface. Les fichiers annexes de SQLite suivent
+        # — un `-wal` abandonné à côté de l'ancien emplacement emporterait les
+        # dernières transactions avec lui.
+        _fermer_base_courante()
+        shutil.move(str(source), str(cible))
+        for suffixe in ("-wal", "-shm", "-journal"):
+            annexe = source.with_name(source.name + suffixe)
+            if annexe.is_file():
+                shutil.move(str(annexe), str(cible.with_name(cible.name + suffixe)))
+        return changer_base(str(cible)), "déplacée"
+
+    # Ni fichier à l'arrivée, ni base à déplacer : on en fabrique une neuve.
+    # `upgrade head` sur un chemin inexistant crée le fichier, y pose tout le
+    # schéma et son contenu initial (catégories, monnaie par défaut) — c'est
+    # exactement ce qui se passe aujourd'hui au premier lancement, simplement
+    # ailleurs.
+    from alembic import command
+    from alembic.config import Config
+
+    config = Config()
+    config.set_main_option("script_location", str(_dossier_alembic()))
+    config.attributes["sqlalchemy_url"] = f"sqlite:///{cible.as_posix()}"
+    try:
+        command.upgrade(config, "head")
+    except Exception as exc:
+        raise ValueError(f"Impossible de créer la base {cible} : {exc}") from exc
+    return changer_base(str(cible)), "créée"
+
+
+def _fermer_base_courante() -> None:
+    """Libère le fichier avant de le déplacer. Sous Windows, un fichier encore
+    ouvert par le moteur ne se renomme pas — le déplacement échouerait avec un
+    « accès refusé » que rien à l'écran ne saurait expliquer."""
+    if _etat.engine is not None:
+        _etat.engine.dispose()
+
+
 def changer_base(chemin: str) -> Path:
     """Bascule toutes les opérations CRUD vers un autre fichier SQLite déjà
     existant — jamais de création implicite (un chemin fautif doit échouer
@@ -232,7 +449,7 @@ def get_db():
         db.close()
 
 
-_appliquer(Path(os.environ.get("BUDGET_DB_PATH", str(_DEFAULT_DEV_DB_PATH))).resolve())
+_appliquer(DATABASE_PATH.resolve())
 
 # Session indépendante de la bascule à chaud ci-dessus, résolue une seule fois
 # via BUDGET_DB_PATH : réservée aux scripts autonomes (seed_dev.py), qui

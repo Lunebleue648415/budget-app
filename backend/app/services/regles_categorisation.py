@@ -30,7 +30,14 @@ import unicodedata
 from dataclasses import dataclass
 from typing import NamedTuple, Optional
 
-from ..constants import TYPES_AVEC_CATEGORIE_LIBRE, ConnecteurRegle, OperateurRegle, TypeOperation
+from ..constants import (
+    OPERATEURS_NOMBRE,
+    TYPES_AVEC_CATEGORIE_LIBRE,
+    ConnecteurRegle,
+    OperateurRegle,
+    TypeOperation,
+)
+from .formule_decoupe import FormuleInvalide, repartir
 
 
 @dataclass
@@ -48,6 +55,23 @@ class ResultatRegle:
     type_code: str
     categorie_id: Optional[int] = None
     compte_autre_id: Optional[int] = None
+    #: La DÉCOUPE que la règle impose, en couples (catégorie, formule) — pas
+    #: encore en montants : une règle est écrite une fois pour des lignes dont
+    #: elle ne connaît pas le montant, et le montant final d'une opération
+    #: importée n'est arrêté qu'après les frais (cf. import_bancaire).
+    #: C'est donc l'appelant qui la résout, quand il tient le bon montant
+    #: (cf. resoudre_decoupes). None = la règle ne découpe pas.
+    decoupes: Optional[list[tuple[int, str]]] = None
+
+    @property
+    def classe(self) -> bool:
+        """La règle a-t-elle déjà dit dans QUELLE catégorie la ligne tombe ?
+
+        Une catégorie unique et une découpe répondent à la même question et
+        s'excluent : sans ce test commun, une règle de complément aurait pu
+        poser une catégorie sur une ligne qu'une règle plus haute avait déjà
+        découpée, et l'histogramme aurait compté la dépense deux fois."""
+        return self.categorie_id is not None or self.decoupes is not None
 
 
 def _normaliser(texte) -> str:
@@ -63,7 +87,60 @@ def _normaliser(texte) -> str:
     return sans_accents.casefold().strip()
 
 
-def _comparer(valeur_champ: str, operateur: str, valeur_regle: str) -> bool:
+def _en_nombre(valeur) -> Optional[float]:
+    """Un nombre lisible dans `valeur`, ou None.
+
+    LA VIRGULE DÉCIMALE EST ADMISE, et les espaces (y compris insécables) qui
+    séparent les milliers sont retirés : les deux côtés de la comparaison
+    peuvent venir d'un formulaire écrit en français (« 1 500,50 ») aussi bien
+    que d'un montant déjà converti en float par le lecteur de relevé."""
+    if valeur is None:
+        return None
+    if isinstance(valeur, (int, float)):
+        return float(valeur)
+    texte = str(valeur).replace(" ", "").replace(" ", "")
+    texte = texte.replace(" ", "").replace(",", ".").strip()
+    if not texte:
+        return None
+    try:
+        return float(texte)
+    except ValueError:
+        return None
+
+
+def _comparer_nombres(valeur_champ, operateur: str, valeur_regle: str) -> bool:
+    """Les six opérateurs numériques. Un champ illisible ou absent ne
+    correspond à AUCUN d'eux, « différent de » compris : une ligne dont on
+    ignore le montant n'est pas une ligne dont le montant diffère de 50, c'est
+    une ligne sur laquelle la règle n'a rien à dire."""
+    gauche = _en_nombre(valeur_champ)
+    droite = _en_nombre(valeur_regle)
+    if gauche is None or droite is None:
+        return False
+    if operateur == OperateurRegle.egal.value:
+        # Une tolérance au centime, comme partout où l'app compare des
+        # montants : 49.999999 saisi par un tableur EST 50.
+        return abs(gauche - droite) < 0.005
+    if operateur == OperateurRegle.different.value:
+        return abs(gauche - droite) >= 0.005
+    if operateur == OperateurRegle.superieur.value:
+        return gauche > droite
+    if operateur == OperateurRegle.superieur_ou_egal.value:
+        return gauche >= droite
+    if operateur == OperateurRegle.inferieur.value:
+        return gauche < droite
+    if operateur == OperateurRegle.inferieur_ou_egal.value:
+        return gauche <= droite
+    return False
+
+
+def _comparer(valeur_champ, operateur: str, valeur_regle: str) -> bool:
+    # L'OPÉRATEUR CHOISIT LA FAMILLE, pas le champ : c'est lui qui est stocké
+    # dans la condition, et le schéma a déjà vérifié à l'écriture qu'il va bien
+    # avec son champ. Se fier ici au nom du champ aurait demandé de rejouer
+    # cette vérification, et d'échouer autrement en cas de désaccord.
+    if operateur in {o.value for o in OPERATEURS_NOMBRE}:
+        return _comparer_nombres(valeur_champ, operateur, valeur_regle)
     champ = _normaliser(valeur_champ)
     attendu = _normaliser(valeur_regle)
     if operateur == OperateurRegle.est.value:
@@ -79,19 +156,39 @@ def _comparer(valeur_champ: str, operateur: str, valeur_regle: str) -> bool:
     return False
 
 
+def _mots_cles(condition: dict) -> list:
+    """Les valeurs que la condition compare, dans l'ordre.
+
+    `valeurs` est la forme canonique (plusieurs mots-clés, combinés en ET) ;
+    `valeur` est celle d'avant, et une règle enregistrée alors ne porte qu'elle.
+    Les deux sont lues ici plutôt que migrées en base : le JSON des conditions
+    est libre, et une migration qui le réécrirait devrait comprendre toutes ses
+    formes passées pour n'apporter que la commodité de n'en lire qu'une."""
+    valeurs = condition.get("valeurs")
+    if valeurs:
+        return [v for v in valeurs if str(v).strip()]
+    return [condition.get("valeur", "")]
+
+
 def evaluer_condition(condition: dict, brute: dict) -> bool:
-    """Une condition porte sur un seul champ.
+    """Une condition porte sur un seul champ, et sur UN OU PLUSIEURS mots-clés.
+
+    LES MOTS-CLÉS SE COMBINENT EN ET, y compris pour les opérateurs négatifs :
+    « ne contient pas A ni B » est ce qu'on veut dire en les écrivant tous les
+    deux, et c'est ce que le ET donne.
 
     Tolère l'ancienne forme `champs: [...]` (avant le passage au champ unique) :
     une règle enregistrée avant ce changement reste évaluable, ses champs
     multiples étant combinés en OU comme à l'origine.
     """
     operateur = condition.get("operateur")
-    valeur = condition.get("valeur", "")
+    mots = _mots_cles(condition)
     if "champ" in condition:
-        return _comparer(brute.get(condition["champ"]), operateur, valeur)
+        valeur_champ = brute.get(condition["champ"])
+        return all(_comparer(valeur_champ, operateur, mot) for mot in mots)
     return any(
-        _comparer(brute.get(champ), operateur, valeur) for champ in condition.get("champs") or []
+        all(_comparer(brute.get(champ), operateur, mot) for mot in mots)
+        for champ in condition.get("champs") or []
     )
 
 
@@ -184,13 +281,16 @@ def _completer(resultat: ResultatRegle, regle, type_operation: TypeOperation) ->
     cette règle a compté.
     """
     pose = False
-    if (
-        resultat.categorie_id is None
-        and regle.categorie_id is not None
-        and type_operation in TYPES_AVEC_CATEGORIE_LIBRE
-    ):
-        resultat.categorie_id = regle.categorie_id
-        pose = True
+    # LA CATÉGORIE ET LA DÉCOUPE OCCUPENT LA MÊME CASE (cf. ResultatRegle.classe).
+    # Une règle propose l'une ou l'autre — jamais les deux, le routeur les rend
+    # exclusives à l'écriture — et ne la pose que si personne ne l'a fait avant.
+    if not resultat.classe and type_operation in TYPES_AVEC_CATEGORIE_LIBRE:
+        if regle.decoupes:
+            resultat.decoupes = [(part.categorie_id, part.formule) for part in regle.decoupes]
+            pose = True
+        elif regle.categorie_id is not None:
+            resultat.categorie_id = regle.categorie_id
+            pose = True
     # Seul un virement a un compte en face : sur tout autre type, ce serait un
     # second compte sur une opération qui n'en touche qu'un.
     if (
@@ -201,6 +301,41 @@ def _completer(resultat: ResultatRegle, regle, type_operation: TypeOperation) ->
         resultat.compte_autre_id = regle.compte_autre_id
         pose = True
     return pose
+
+
+def resoudre_decoupes(
+    decoupes: Optional[list[tuple[int, str]]], montant: float
+) -> tuple[Optional[list[tuple[int, float]]], Optional[str]]:
+    """Transforme les formules d'une règle en montants, pour un montant donné.
+
+    Rend `(parts, None)` en cas de succès, `(None, message)` sinon — jamais
+    d'exception : l'appelant est l'aperçu d'import, qui doit AFFICHER une ligne
+    fautive parmi les autres, pas s'interrompre. Un relevé de trois cents lignes
+    dont une seule fait tomber une formule doit rester importable pour les deux
+    cent quatre-vingt-dix-neuf autres.
+
+    LA DÉCOUPE EST ABANDONNÉE SI ELLE ÉCHOUE — la ligne garde son type et
+    n'aura simplement pas de catégorie, comme si aucune règle ne l'avait
+    classée. Le message remonte à l'écran d'aperçu, où la ligne se reprend à la
+    main.
+    """
+    if not decoupes:
+        return None, None
+    if montant is None:
+        return None, "montant inconnu : la découpe ne peut pas être calculée"
+    try:
+        montants = repartir([formule for _, formule in decoupes], abs(montant))
+    except FormuleInvalide as erreur:
+        return None, f"découpe impossible ({erreur})"
+    return [
+        (categorie_id, part)
+        for (categorie_id, _), part in zip(decoupes, montants)
+        # Une part nulle ne classe rien et ferait échouer la contrainte
+        # `montant > 0` de la table : une formule qui rend 0 sur cette
+        # ligne-là (« min(montant; 50) » sur une opération à 0) veut dire
+        # « rien pour cette catégorie », pas « une part vide ».
+        if part > 0
+    ], None
 
 
 # ---------- Règles d'import de placements ----------

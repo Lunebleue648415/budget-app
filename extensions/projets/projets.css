@@ -82,14 +82,50 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* EN COULEUR ORDINAIRE, ET C'EST VOULU. Ce total était rouge, comme une
+   alerte. Or un projet ne fait à peu près jamais que coûter : ses montants sont
+   négatifs par construction, et une couleur qui ne varie pas n'informe de rien
+   — elle ne fait que peindre en alarme un voyage qu'on est content d'avoir
+   fait. Le mot « dépensé » et le signe « − » disent déjà le sens ; la graisse
+   suffit à désigner le chiffre principal. */
 .projet-total-depenses {
-  color: var(--error-text, #e66767);
+  color: var(--text-primary);
   font-weight: 600;
 }
 
 .projet-total-entrees {
   color: var(--text-secondary);
   font-size: 0.9em;
+}
+
+/* MÊME RÈGLE POUR LES LIGNES D'OPÉRATION des deux tableaux du projet. Elles
+   passent par `montantHtml` du noyau, qui colore selon le sens (vert / orange)
+   — pertinent sur la page Opérations, où entrées et sorties se mélangent, et
+   sans objet ici où presque tout sort. Le signe reste, la couleur part.
+   Un ZÉRO garde la sienne (`.montant-nul`, plus discrète) : elle ne dit pas
+   « négatif », elle dit « rien ». */
+#sous-section-comptes-globale-projets .montant.entree,
+#sous-section-comptes-globale-projets .montant.sortie,
+#sous-section-comptes-globale-projets .montant.neutre {
+  color: var(--text-primary);
+}
+
+/* ---------- L'histogramme d'un projet ---------- */
+
+/* UNE SECTION PAR MONNAIE, comme les totaux juste au-dessus : l'app
+   n'additionne jamais deux monnaies, et un projet à cheval sur deux devises a
+   donc deux graphes plutôt qu'un graphe faux. */
+.projet-histo-bloc {
+  margin-bottom: 1rem;
+}
+
+/* Le nom de la monnaie, affiché SEULEMENT quand il y en a plusieurs (cf.
+   projets.js) : au-dessus d'un graphe unique, il ne ferait que répéter le
+   symbole déjà collé à chaque montant. */
+.projet-histo-monnaie {
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  margin-bottom: 0.35rem;
 }
 
 /* L'en-tête d'un projet ouvert et sa sortie, sur une seule ligne : le retour

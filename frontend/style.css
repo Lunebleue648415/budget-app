@@ -332,11 +332,23 @@ h4 {
 /* Volontairement plus compacts que les cartes KPI du haut : ils commentent
    l'histogramme qui suit, ils ne rivalisent pas avec les soldes. Trois colonnes
    égales tant que la largeur le permet, puis empilées. */
+/* DEUX CARTES, sur la grille de TROIS des KPI du haut : elles s'alignent donc
+   sur les deux premières, et la colonne vide à droite garde à la rangée sa
+   place dans la page. `auto-fit` les aurait étirées sur toute la largeur — deux
+   cartes deux fois plus larges que celles d'au-dessus, pour des chiffres du
+   même ordre. Sous 700 px, la colonne fantôme disparaît et les deux cartes
+   s'empilent comme le reste. */
 .flux-periode {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  grid-template-columns: repeat(3, minmax(170px, 1fr));
   gap: 0.6rem;
   margin: 0.9rem 0 1.1rem;
+}
+
+@media (max-width: 700px) {
+  .flux-periode {
+    grid-template-columns: 1fr;
+  }
 }
 
 .flux-carte {
@@ -922,7 +934,11 @@ form .full-width {
   text-align: right;
 }
 
-#dashboard-histogramme {
+/* LE CADRE D'UN HISTOGRAMME, par une classe et non par l'identifiant du
+   dashboard : le même graphe se dessine désormais aussi dans un projet
+   (extension « Projets »), et une règle attachée à un id aurait obligé à la
+   recopier — deux cadres qui se ressemblent aujourd'hui et plus demain. */
+.histogramme-cadre {
   background: var(--bg-surface);
   border: 1px solid var(--border-soft);
   border-radius: var(--radius);
@@ -2400,6 +2416,35 @@ tr.ligne-apercu-edition td:has(> button) {
   margin-bottom: 0.25rem;
 }
 
+/* LA NOTE D'UNE RÈGLE (migration 0050), sur sa carte. Ici et non dans
+   extensions/regles/regles.css : les DEUX familles de règles d'import
+   l'affichent — les bancaires (extension « Règles ») et celles des relevés de
+   compte-titres (extension « Import de placements ») — et une feuille
+   d'extension n'est chargée que si CETTE extension-là tourne.
+
+   Discrète, en italique : c'est une glose sur la règle, pas la règle. Elle se
+   replie et coupe les mots trop longs — une note n'a pas de longueur convenue,
+   et rien ne doit élargir une vignette de galerie au point de casser la
+   grille. */
+.regle-carte-description {
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  font-style: italic;
+  margin: 0.15rem 0 0.35rem;
+  overflow-wrap: anywhere;
+  /* Les retours à la ligne saisis sont conservés : une note en trois points
+     s'écrit en trois lignes. */
+  white-space: pre-line;
+}
+
+/* Le champ de saisie, dans les deux éditeurs : redimensionnable en HAUTEUR
+   seulement — l'élargir déborderait de la colonne du formulaire. */
+#regle-description,
+#impl-regle-description {
+  resize: vertical;
+  min-height: 2.6rem;
+}
+
 .regle-carte-conditions,
 .regle-carte-action {
   font-size: 0.85rem;
@@ -2444,16 +2489,35 @@ tr.ligne-apercu-edition td:has(> button) {
   min-width: 11rem;
 }
 
+/* Une note s'écrit sur toute la largeur disponible : à la taille par défaut
+   d'un <textarea> (une vingtaine de caractères), elle aurait été la seule
+   saisie de l'éditeur plus étroite que ce qu'on y écrit. */
+.regle-champ-ligne > textarea {
+  flex: 1;
+  min-width: 14rem;
+}
+
 /* Ces contrôles vivent hors <form> : ils doivent porter leur propre style (les
    règles `form input`/`form select` ne s'y appliquent pas).
    `.regle-champ-ligne` est nommée d'après l'éditeur de règles, mais la page
    Import la réutilise pour le mode de comparaison des doublons : là-bas, hors
    `.regle-editeur`, le menu se retrouvait au style natif du navigateur, seul
    contrôle de toute l'application à ne pas suivre le thème. */
+/* Le <textarea> y est traité comme les autres champs : la note d'une règle
+   d'import (migration 0050) est une saisie de cet éditeur comme le nom, et
+   c'était le seul contrôle du bloc à retomber au style natif du navigateur. */
 .regle-editeur input[type="text"],
+/* LE CHAMP NUMÉRIQUE AUSSI, et c'était le manque : une condition sur le
+   MONTANT rend un `input[type="number"]` (cf. regles.js), qu'aucun sélecteur ne
+   visait. Il retombait donc au contrôle natif du navigateur — fond gris clair,
+   bordure grise, flèches — seule saisie de toute l'application à ne pas suivre
+   le thème, et juste à côté de champs qui le suivent. */
+.regle-editeur input[type="number"],
 .regle-editeur select,
+.regle-editeur textarea,
 .regle-champ-ligne input[type="text"],
 .regle-champ-ligne input[type="number"],
+.regle-champ-ligne textarea,
 .regle-champ-ligne select {
   background: var(--bg-surface-alt);
   border: 1px solid var(--border);
@@ -2466,7 +2530,9 @@ tr.ligne-apercu-edition td:has(> button) {
 
 .regle-editeur input[type="text"]:focus,
 .regle-editeur select:focus,
+.regle-editeur textarea:focus,
 .regle-champ-ligne input:focus,
+.regle-champ-ligne textarea:focus,
 .regle-champ-ligne select:focus {
   outline: none;
   border-color: var(--accent);
@@ -2525,11 +2591,52 @@ tr.ligne-apercu-edition td:has(> button) {
   font-size: 0.8rem;
   color: var(--text-secondary);
   white-space: nowrap;
+  /* Toute l'étiquette est cliquable, pas seulement le rond de 13 px : le
+     curseur le dit. */
+  cursor: pointer;
 }
 
-.regle-condition input[type="text"] {
+/* LE CHAMP CHOISI SE VOIT. Rien ne le distinguait des cinq autres qu'un rond
+   coché de treize pixels, alors que c'est LUI qui décide de la suite de la
+   rangée — le montant n'admet ni les mêmes opérateurs ni la même saisie que le
+   libellé, et une condition mal ciblée ne se remarquait qu'à l'enregistrement.
+   `:has()` plutôt qu'une classe posée en JS : l'état est déjà dans le DOM
+   (l'attribut `checked` du bouton radio), le dupliquer aurait ajouté un endroit
+   où il peut se désaccorder. */
+.regle-champ-case:has(input:checked) {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+/* LE CHAMP DE VALEUR, DANS LES DEUX FAMILLES. Le sélecteur ne visait que
+   `type="text"` : dès qu'une condition portait sur le MONTANT, le champ
+   redevenait `type="number"` (cf. regles.js) et perdait d'un coup sa largeur et
+   son alignement — une case étroite, collée à l'opérateur, au milieu d'une
+   rangée dont tout le reste respirait. C'était la seule saisie de l'écran qui
+   ne ressemblait à aucune autre. */
+.regle-condition input[type="text"],
+.regle-condition input[type="number"] {
   flex: 1;
   min-width: 9rem;
+}
+
+/* Un montant se lit comme un nombre : chiffres de largeur fixe, alignés à
+   droite comme partout ailleurs dans l'app (soldes, totaux, colonnes de
+   montants). Les FLÈCHES du champ numérique sont retirées : elles ne servent
+   qu'à monter de 0,01 en 0,01 — inutile pour un seuil qu'on tape — et volaient
+   le tiers de la largeur du champ. La saisie au clavier, elle, ne change pas. */
+.regle-condition input[type="number"] {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  /* Firefox d'un côté, WebKit/Blink de l'autre : les deux sont nécessaires. */
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+.regle-condition input[type="number"]::-webkit-outer-spin-button,
+.regle-condition input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
 }
 
 /* Badge de traçabilité dans l'aperçu d'import : indique quelle règle a
@@ -3458,6 +3565,30 @@ body.modale-ouverte {
   line-height: 1.55;
 }
 
+/* Le champ de chemin de la modale « Où ranger tes données ? ». Les labels de
+   l'application vivent normalement dans un `form` en grille, qui donne aux
+   champs leur largeur ; une modale n'en a pas, d'où ces quelques règles plutôt
+   qu'un formulaire complet dont on n'utiliserait rien d'autre. */
+.modale label {
+  display: block;
+  margin: 0 0 0.6rem;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+}
+
+.modale label input[type="text"] {
+  display: block;
+  width: 100%;
+  /* Sans quoi le rembourrage du champ s'ajoute aux 100 % et déborde la modale,
+     qui se met alors à défiler horizontalement. */
+  box-sizing: border-box;
+  margin-top: 0.3rem;
+  /* Un chemin est long et se lit par la fin : la police à chasse fixe rend les
+     séparateurs de dossiers réguliers, donc le chemin lisible d'un coup d'œil. */
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+}
+
 .modale-liste {
   list-style: none;
   padding: 0;
@@ -3541,4 +3672,330 @@ body.modale-ouverte {
 .repartition-montant.montant-nul,
 .montant-nul {
   color: var(--text-primary);
+}
+
+/* ---------- Découpe d'une opération ---------- */
+/* Une opération, plusieurs catégories (cf. models.OperationDecoupe). Deux
+   endroits : l'éditeur, dans le formulaire, et le détail dépliable sous la
+   ligne du tableau. */
+
+/* L'éditeur : une ligne par part, en trois colonnes fixes. Une grille et non
+   un flex — les menus de catégorie doivent s'aligner d'une ligne à l'autre,
+   sans quoi la liste se lit en zigzag. */
+.decoupe-part {
+  display: grid;
+  grid-template-columns: 1fr 9rem auto;
+  gap: 0.5rem;
+  align-items: center;
+  margin-bottom: 0.4rem;
+}
+
+.decoupe-part .decoupe-retirer {
+  min-width: 0;
+  padding: 0.3rem 0.6rem;
+  line-height: 1;
+}
+
+.decoupe-pied {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 0.5rem;
+}
+
+/* Le compteur du garde-fou. Rouge tant que les parts ne totalisent pas le
+   montant : c'est exactement ce que le serveur refusera (400), autant le dire
+   pendant la saisie. */
+.decoupe-total {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+.decoupe-total.erreur {
+  color: var(--error-text);
+}
+
+/* Dans le tableau : le bouton qui déplie les parts. Écrit comme un lien plutôt
+   que comme un bouton, pour qu'il tienne la place d'un nom de catégorie sans
+   alourdir la colonne. */
+.decoupe-bascule {
+  background: none;
+  border: none;
+  padding: 0;
+  min-width: 0;
+  cursor: pointer;
+  color: var(--accent-light);
+  font-size: inherit;
+  text-align: left;
+  border-bottom: 1px dashed var(--border);
+}
+
+.decoupe-bascule:hover,
+.decoupe-bascule:focus-visible {
+  color: var(--text-primary);
+  border-bottom-color: var(--accent-light);
+}
+
+.decoupe-bascule.ouvert {
+  color: var(--text-primary);
+}
+
+/* La ligne repliée. Le fond alterné la rattache visuellement à l'opération
+   au-dessus, dont elle n'est qu'un détail — elle ne doit pas se lire comme une
+   opération de plus. */
+.decoupe-detail > td {
+  background: var(--bg-surface-alt);
+  padding-top: 0.35rem;
+  padding-bottom: 0.5rem;
+}
+
+.decoupe-detail-liste {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 1.5rem;
+}
+
+.decoupe-detail-liste li {
+  display: flex;
+  justify-content: space-between;
+  max-width: 26rem;
+  padding: 0.15rem 0;
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+}
+
+.decoupe-detail-montant {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+
+/* Le compte d'où sort un relevé, accolé au nom du fichier dans l'historique
+   d'import. Même traitement que toute annotation de provenance dans l'app :
+   italique et couleur secondaire — c'est un complément du libellé, pas une
+   seconde information de même rang. */
+.import-historique-compte {
+  color: var(--text-secondary);
+  font-style: italic;
+  white-space: nowrap;
+}
+
+/* ---------- Les logos des boutons d'onglet ---------- */
+
+/* UN PICTOGRAMME À GAUCHE DU LIBELLÉ, dans les onglets qu'on ouvre rarement et
+   qu'on reconnaît mal les uns des autres (Import, Extensions, Monnaies, Base de
+   données) : le mot les nomme, le logo les fait retrouver sans être lu.
+
+   DANS LE BOUTON, ET NON DANS LE TITRE DE LA PAGE : c'est sur le bouton que
+   l'œil cherche où aller ; un titre, on ne le lit qu'une fois arrivé, quand la
+   question ne se pose plus.
+
+   PAR <img> ET NON EN LIGNE, contrairement aux pictogrammes du noyau : ces
+   dessins viennent de fichiers déposés dans frontend/img (cf. son LISEZMOI), et
+   les recopier dans le HTML aurait mis leur tracé à deux endroits. Le prix à
+   payer est qu'un SVG chargé par `img` n'hérite d'aucune couleur de la page :
+   ceux-ci arrivent donc avec leur encre d'origine, presque noire, invisible sur
+   nos fonds. D'où le filtre — le MÊME enchaînement que celui du pictogramme de
+   calendrier plus haut dans cette feuille : `brightness(0)` écrase le dessin en
+   noir pur quelle que soit sa teinte de départ, `invert(1)` le retourne en
+   blanc pur. Le résultat est monochrome et le restera quels que soient les
+   fichiers qu'on déposera demain.
+
+   L'opacité suit celle du libellé : discrète sur un onglet au repos, pleine sur
+   l'onglet actif — le logo appartient au bouton, il ne s'en détache pas. */
+.onglet-logo {
+  width: 1em;
+  height: 1em;
+  /* Aligné sur la ligne de base du texte plutôt qu'au milieu de la boîte : à
+     `vertical-align: middle`, un logo un peu haut fait bouger l'interligne. */
+  vertical-align: -0.14em;
+  margin-right: 0.4rem;
+  filter: brightness(0) invert(1);
+  opacity: 0.6;
+}
+
+.sous-onglets button:hover .onglet-logo,
+.sous-onglets button.active .onglet-logo {
+  opacity: 1;
+}
+
+/* ---------- Les réglages du camembert « Répartition des avoirs » ---------- */
+
+/* La monnaie à gauche, ce qu'une extension pose à droite (la case « tout
+   convertir » de l'extension « Monnaies »). Sur une seule ligne tant que la
+   largeur le permet, et repliés dessous sinon. */
+.repartition-barre {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.2rem;
+  margin-bottom: 0.6rem;
+}
+
+.repartition-barre > label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+/* Ce menu vit hors <form> : il doit porter son propre style, sans quoi il
+   serait le seul contrôle de la page à ne pas suivre le thème. */
+.repartition-barre select {
+  background: var(--bg-surface-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  padding: 0.35rem 0.5rem;
+  font-size: 0.85rem;
+  font-family: inherit;
+}
+
+.repartition-barre select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
+}
+
+/* ---------- Le troisième cran du sélecteur : les semaines du mois ---------- */
+
+/* La flèche à gauche, les semaines à sa droite — sur la même ligne, un cran
+   sous les mois. Repliée, il ne reste que la flèche : une rangée d'onglets
+   qu'on n'ouvre qu'une fois sur dix ne doit pas occuper la place en
+   permanence. */
+.periode-semaines {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.15rem;
+}
+
+/* PETITE, ET SANS CADRE, contrairement aux flèches ▲▼ de gauche : celles-ci
+   changent le niveau qui FILTRE, celle-ci ne fait qu'ouvrir un tiroir. Un
+   bouton de même poids aurait laissé croire à un troisième niveau de filtre
+   permanent. */
+.periode-chevron {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  padding: 0.1rem 0.2rem;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.15s;
+}
+
+.periode-chevron:hover {
+  color: var(--accent-light);
+}
+
+/* Dépliée, elle prend la couleur d'accent : c'est le seul indice, une fois la
+   rangée ouverte, que c'est elle qui l'a ouverte. */
+.periode-chevron[aria-expanded="true"] {
+  color: var(--accent-light);
+}
+
+#dashboard-periode-semaines {
+  margin: 0;
+}
+
+/* « Moyenne » ferme la rangée, séparée des semaines par un trait : les autres
+   onglets désignent une période du mois, celui-ci les résume toutes. Sans ce
+   trait, il se lisait comme une semaine de plus. */
+#dashboard-periode-semaines .semaine-moyenne {
+  margin-left: 0.5rem;
+  border-left: 1px solid var(--border);
+  padding-left: 0.9rem;
+}
+
+/* ---------- Réorganiser les colonnes en glissant les en-têtes ---------- */
+
+/* Le titre et le bouton de relecture sur une ligne. */
+.apercu-fichier-entete {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.apercu-fichier-entete h3 {
+  margin-bottom: 0;
+}
+
+/* PETIT, ET SANS COULEUR D'ACCENT au repos : relire n'est pas l'action de
+   l'écran, c'est ce qu'on fait quand on a fini de déplacer. Il ne s'allume que
+   lorsqu'il a quelque chose à relire. */
+#btn-import-apercu-relire {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.9rem;
+  height: 1.9rem;
+  padding: 0;
+  background: var(--bg-surface-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+}
+
+#btn-import-apercu-relire:hover {
+  color: var(--text-primary);
+  border-color: var(--accent-light);
+}
+
+/* Quelque chose à relire : le bouton le dit, et l'alerte juste en dessous
+   explique quoi. Sans cet appel, un tableau recoloré au-dessus de lignes
+   inchangées se lit comme une panne. */
+#btn-import-apercu-relire.a-relire {
+  color: var(--accent-light);
+  border-color: var(--accent-light);
+}
+
+.apercu-fichier-alerte {
+  color: var(--depense);
+}
+
+/* SEULS LES EN-TÊTES SE DÉPLACENT, jamais les cellules : ce qu'on réorganise
+   est la façon de lire le fichier, pas le fichier. Le curseur le dit. */
+.apercu-entete-deplacable {
+  cursor: grab;
+  user-select: none;
+}
+
+.apercu-entete-glissee {
+  opacity: 0.45;
+}
+
+/* La colonne où l'en-tête va tomber. Un liseré vertical plutôt qu'un fond :
+   les en-têtes portent déjà une couleur par propriété, et la repeindre
+   effacerait justement l'information qu'on est en train de déplacer. */
+.apercu-entete-cible {
+  box-shadow: inset 0 -3px 0 0 var(--accent-light);
+}
+
+/* UNE COLONNE QUE LE FICHIER N'A PAS. Elle n'existe que pour qu'on puisse
+   attraper la propriété qui la vise et la déplacer sur une colonne réelle : un
+   preset neuf lit « Montant » en colonne 7, et devant un relevé de quatre
+   colonnes cette propriété n'apparaissait nulle part.
+
+   HACHURÉE ET PÂLE : elle ne décrit aucune donnée, et se lirait sinon comme une
+   colonne du fichier qu'on aurait oublié de remplir. La couleur de propriété de
+   l'en-tête reste visible — c'est elle qu'on vient chercher. */
+.apercu-col-hors-fichier {
+  opacity: 0.55;
+  background-image: repeating-linear-gradient(
+    45deg,
+    transparent,
+    transparent 4px,
+    var(--border-soft) 4px,
+    var(--border-soft) 5px
+  );
+}
+
+/* Le corps du tableau, lui, n'a vraiment rien à montrer : pas même la trame,
+   qui ferait croire à un contenu masqué. */
+td.apercu-col-hors-fichier {
+  background-image: none;
 }

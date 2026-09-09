@@ -38,6 +38,11 @@ const state = {
   // consultent pas ensemble.
   dashboardMonnaieId: null,
   categoriesMonnaieId: null,
+  // La monnaie du camembert « Répartition des avoirs », page Vue globale des
+  // comptes. UNE TROISIÈME SÉLECTION, indépendante des deux autres : cette
+  // page-là n'a pas d'onglet de monnaie (chaque carte montre tous ses soldes),
+  // et le camembert est le seul de ses éléments qui doive en choisir une.
+  comptesRepartitionMonnaieId: null,
   // Les six types d'opération (table `type_operation`) : le frontend ne déduit
   // plus le type d'une catégorie et d'un booléen, il le lit. `code` est la clé
   // technique stable ; `nom` n'est qu'un libellé, renommable par l'utilisateur.
@@ -50,6 +55,12 @@ const state = {
   // l'arborescence des filtres qui pilote la période, piloté par les flèches du
   // sélecteur (cf. initPeriodeSelector).
   dashboardPeriode: { vue: "mois" },
+  // Le détail par semaine de l'histogramme, sous le sélecteur de mois.
+  // `ouvert` : la rangée de semaines est-elle dépliée. `choix` : le rang de la
+  // semaine regardée (1 pour la première du mois), la chaîne "moyenne", ou
+  // NULL — et null veut dire « le mois entier », l'état où l'histogramme est
+  // celui que le dashboard a toujours montré.
+  dashboardSemaines: { ouvert: false, choix: null },
   categoriesPeriode: {},
   triSelections: {
     classique: "date-desc",
@@ -423,6 +434,19 @@ const ICONE_LOUPE = `
 // Chevrons de navigation entre correspondances : un simple V, tracé au même
 // trait que le reste, plutôt qu'une flèche pleine — deux boutons qu'on clique
 // en rafale doivent rester discrets.
+// Deux flèches en boucle : relire le fichier avec la configuration du moment.
+// Même famille de tracé que les autres pictogrammes du noyau, donc même
+// héritage de couleur.
+const ICONE_RELIRE = `
+  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+       stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M21 12a9 9 0 0 1-9 9 9 9 0 0 1-7.7-4.3" />
+    <path d="M3 12a9 9 0 0 1 9-9 9 9 0 0 1 7.7 4.3" />
+    <path d="M20 3v5h-5" />
+    <path d="M4 21v-5h5" />
+  </svg>
+`;
+
 const ICONE_CHEVRON_HAUT = `
   <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
        stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -1111,9 +1135,9 @@ function chargerSousPageParametres(page) {
   if (page === "parametres-correspondances") loadCorrespondances();
   if (page === "parametres-import") loadImportSection();
   if (page === "parametres-extensions") loadExtensions();
-  // Sous-pages apportées par une extension (« Base de données » en version
-  // développeur, par exemple) : comme pour les écrans principaux, le noyau ne
-  // les connaît pas par leur nom et demande à qui de droit.
+  if (page === "parametres-bdd") loadParametresBdd();
+  // Sous-pages apportées par une extension : comme pour les écrans principaux,
+  // le noyau ne les connaît pas par leur nom et demande à qui de droit.
   BudgetApp.extensions.ouvrirSousPage(page);
 }
 
@@ -1334,7 +1358,6 @@ async function loadDashboardData(annee, mois) {
     if (!data.kpis.some((k) => k.monnaie_id === state.dashboardMonnaieId)) {
       state.dashboardMonnaieId = data.kpis.length > 0 ? data.kpis[0].monnaie_id : null;
     }
-    const monnaieId = state.dashboardMonnaieId;
 
     renderOngletsMonnaies(
       "dashboard-monnaies",
@@ -1346,20 +1369,77 @@ async function loadDashboardData(annee, mois) {
       }
     );
 
-    const libellePeriode =
-      state.dashboardPeriode.vue === "annee" ? `Année ${annee}` : libelleMois(annee, mois);
-    document.getElementById("dashboard-periode-libelle").textContent = libellePeriode.toLowerCase();
     renderKpisDashboard(data.kpis.find((k) => k.monnaie_id === state.dashboardMonnaieId) || null);
-    const kpisMonnaie = data.kpis.find((k) => k.monnaie_id === monnaieId);
-    renderRepartitionComptes(
-      data.comptes,
-      monnaieId,
-      kpisMonnaie ? kpisMonnaie.valorisation_placements : 0
-    );
+    // EN DERNIER : le détail par semaine est un supplément, replié neuf fois
+    // sur dix — il ne doit pas retarder l'affichage des chiffres du mois. C'est
+    // lui qui pose le libellé de période du titre, la semaine choisie en
+    // faisant partie.
+    await majDetailSemaines(annee, mois);
   } catch (err) {
     showMessage(err.message, "error");
   }
 }
+
+/* ---------- Répartition des avoirs, page Vue globale des comptes ---------- */
+
+// Le dernier /dashboard lu par cette page. Gardé pour que changer la monnaie du
+// camembert le redessine sans nouvel aller-retour : les soldes n'ont pas changé
+// entre-temps, seule la monnaie qu'on regarde change.
+let comptesGlobaleDernier = null;
+
+/**
+ * Le menu de monnaies du camembert, et le camembert lui-même.
+ *
+ * UNE LISTE DÉROULANTE, ET NON DES ONGLETS comme sur le dashboard : ici la
+ * monnaie ne pilote qu'un seul élément de la page, pas l'écran entier. Une
+ * rangée d'onglets en haut de page aurait laissé croire que les cartes de
+ * compte en dessous s'y plient aussi, alors qu'elles montrent toutes leurs
+ * monnaies.
+ *
+ * LA SÉLECTION SURVIT d'une visite à l'autre tant que la monnaie existe encore
+ * (cf. state.comptesRepartitionMonnaieId) ; à défaut, la première de la liste.
+ *
+ * Une extension peut poser une case à côté du menu (« tout convertir »,
+ * extension « Monnaies ») : elle se greffe sur cette fonction, qui reste donc
+ * le seul endroit d'où le camembert est dessiné.
+ */
+function renderRepartitionAvoirs() {
+  const data = comptesGlobaleDernier;
+  const menu = document.getElementById("globale-repartition-monnaie");
+  if (!data || !menu) return;
+
+  const monnaies = data.monnaies || [];
+  if (!monnaies.some((m) => m.id === state.comptesRepartitionMonnaieId)) {
+    state.comptesRepartitionMonnaieId = monnaies.length > 0 ? monnaies[0].id : null;
+  }
+  menu.innerHTML = monnaies
+    .map(
+      (m) =>
+        `<option value="${m.id}" ${
+          m.id === state.comptesRepartitionMonnaieId ? "selected" : ""
+        }>${escapeHtml(m.nom)}</option>`
+    )
+    .join("");
+  // Un menu à un seul choix ne choisit rien : il est masqué avec son étiquette
+  // tant que l'app est mono-devise, comme la barre d'onglets de cette page
+  // l'est tant qu'elle n'a qu'un onglet.
+  menu.parentElement.style.display = monnaies.length > 1 ? "" : "none";
+
+  const monnaieId = state.comptesRepartitionMonnaieId;
+  const kpis = (data.kpis || []).find((k) => k.monnaie_id === monnaieId);
+  renderRepartitionComptes(
+    data.comptes,
+    monnaieId,
+    kpis ? kpis.valorisation_placements : 0
+  );
+}
+
+document
+  .getElementById("globale-repartition-monnaie")
+  .addEventListener("change", (e) => {
+    state.comptesRepartitionMonnaieId = Number(e.target.value);
+    renderRepartitionAvoirs();
+  });
 
 /**
  * VUE GLOBALE DES COMPTES : les mêmes cartes qu'affichait le dashboard avant
@@ -1378,6 +1458,12 @@ async function loadComptesGlobale() {
   try {
     await refreshMonnaies();
     const data = await apiFetch("/dashboard");
+
+    // Le camembert d'abord : il résume ce que les cartes détaillent ensuite.
+    // `data` est gardé de côté pour que changer de monnaie le redessine SANS
+    // redemander le dashboard — rien d'autre que la monnaie n'a changé.
+    comptesGlobaleDernier = data;
+    renderRepartitionAvoirs();
 
     renderComptesCards(
       "globale-comptes-courants",
@@ -1402,6 +1488,12 @@ async function loadComptesGlobale() {
   }
 }
 
+// Les barres du MOIS affiché, telles que le serveur vient de les rendre.
+// Gardées de côté parce que cocher puis décocher une semaine doit pouvoir
+// redessiner le mois sans redemander le dashboard (cf.
+// renderHistogrammeDashboard).
+let dashboardDepensesDuMois = [];
+
 function renderKpisDashboard(kpis) {
   if (!kpis) {
     // Aucun compte, donc aucune monnaie en jeu : rien à agréger.
@@ -1412,9 +1504,9 @@ function renderKpisDashboard(kpis) {
       "kpi-variation",
       "kpi-total-entrees",
       "kpi-total-sorties",
-      "kpi-flux-difference",
     ].forEach((id) => (document.getElementById(id).textContent = "-"));
-    renderHistogrammeDepenses([], null);
+    dashboardDepensesDuMois = [];
+    renderHistogrammeDashboard([], null);
     return;
   }
   const monnaieId = kpis.monnaie_id;
@@ -1433,8 +1525,15 @@ function renderKpisDashboard(kpis) {
     kpis.total_avoirs,
     monnaieId
   );
+  // LA VARIATION BRUTE, et non celle des flux : ce qui est PASSÉ sur les
+  // comptes, à sa date et pour son montant, sans étaler une dépense amortie ni
+  // retrancher ce qu'on nous rendra d'une dépense remboursable (cf.
+  // services/soldes.get_variation_brute). C'est la question qu'on se pose
+  // devant un relevé — ce que le mois COÛTE se lit plus bas, dans les deux
+  // cartes de flux, qui répondent à une autre question et n'ont donc jamais le
+  // même chiffre.
   const variationEl = document.getElementById("kpi-variation");
-  const variation = kpis.variation_previsionnelle;
+  const variation = kpis.variation_brute || 0;
   variationEl.textContent = `${
     variation >= 0 && !montantEstNul(variation) ? "+" : ""
   }${formatMontant(variation, monnaieId)}`;
@@ -1446,25 +1545,32 @@ function renderKpisDashboard(kpis) {
   // d'être imprécis — il annonçait le mauvais ordre de grandeur. C'est le seul
   // libellé de la carte depuis que les sous-textes ont été retirés ; le mois
   // exact, lui, se lit dans le sélecteur de période juste en dessous.
-  document.getElementById("kpi-variation-label").textContent =
+  // `firstChild` et non `textContent` : la carte porte une pastille « i » que
+  // réécrire tout le libellé emporterait.
+  document.getElementById("kpi-variation-label").firstChild.nodeValue =
     state.dashboardPeriode.vue === "annee" ? t("Variation de l'année") : t("Variation du mois");
 
   renderFluxPeriode(kpis, monnaieId);
-  renderHistogrammeDepenses(kpis.depenses_par_categorie, monnaieId);
+  dashboardDepensesDuMois = kpis.depenses_par_categorie || [];
+  renderHistogrammeDashboard(dashboardDepensesDuMois, monnaieId);
 }
 
 /**
- * Entrées, sorties, différence — les trois chiffres posés sous le sélecteur de
+ * Total Entrées, Total Dépenses — les deux chiffres posés sous le sélecteur de
  * période, à côté de l'histogramme qu'ils résument.
  *
- * Les trois viennent d'un SEUL calcul côté serveur (get_flux_periode) : la
- * différence n'est pas recalculée ici, sinon elle pourrait finir par ne plus
- * valoir ce que les deux autres annoncent.
+ * DEUX CARTES ET PLUS TROIS. La « Différence » qui les suivait valait, à un
+ * signe près, la variation affichée en haut de page : deux chiffres pour une
+ * seule mesure, dont l'un des deux devait forcément finir par sembler faux.
+ *
+ * CE QU'ILS RÉPONDENT n'est pas ce que répond la variation du haut : ici, ce
+ * que la période COÛTE et RAPPORTE — dépense amortie étalée, dépense
+ * remboursable réduite à son reste à charge (cf. get_flux_periode) ; là-haut,
+ * ce qui est PASSÉ sur les comptes. Les deux infobulles le disent.
  */
 function renderFluxPeriode(kpis, monnaieId) {
   const entrees = kpis.total_entrees || 0;
   const sorties = kpis.total_sorties || 0;
-  const difference = kpis.variation_previsionnelle || 0;
   // MÊME RÈGLE QUE PARTOUT : zéro ne porte pas de signe. Ici le « + » et le
   // « − » sont écrits à la main, ils ne passent donc pas par le garde-fou de
   // `formatMontant` et doivent être tus explicitement — « −0,00 € » de sorties
@@ -1472,14 +1578,9 @@ function renderFluxPeriode(kpis, monnaieId) {
   const signe = (valeur, prefixe) =>
     `${montantEstNul(valeur) ? "" : prefixe}${formatMontant(valeur, monnaieId)}`;
   document.getElementById("kpi-total-entrees").textContent = signe(entrees, "+");
-  // Le signe est porté par le libellé (« sorties ») autant que par la couleur :
-  // un total de sorties s'écrit en positif, c'est une somme dépensée.
+  // Le signe est porté par le libellé (« dépenses ») autant que par la couleur :
+  // un total de dépenses s'écrit en positif, c'est une somme dépensée.
   document.getElementById("kpi-total-sorties").textContent = signe(sorties, "−");
-  const differenceEl = document.getElementById("kpi-flux-difference");
-  differenceEl.textContent = signe(difference, difference >= 0 ? "+" : "");
-  differenceEl.classList.toggle("positif", difference > 0 && !montantEstNul(difference));
-  differenceEl.classList.toggle("negatif", difference < 0 && !montantEstNul(difference));
-  differenceEl.classList.toggle("montant-nul", montantEstNul(difference));
 }
 
 /* ---------- Répartition des avoirs par type de compte (camembert) ---------- */
@@ -1535,7 +1636,8 @@ const TYPES_REPARTITION_COMPTES = [
  * quelle que soit la répartition.
  */
 function renderRepartitionComptes(comptes, monnaieId, valorisationPlacements = 0) {
-  const container = document.getElementById("dashboard-repartition-comptes");
+  const container = document.getElementById("globale-repartition-comptes");
+  if (!container) return;
   if (!monnaieId) {
     // Aucune monnaie en jeu (base sans compte) : rien à répartir.
     container.innerHTML = "";
@@ -1708,8 +1810,22 @@ function placerInfobulleHistogramme(bulle, container, evenement) {
   bulle.style.top = `${Math.max(0, y)}px`;
 }
 
-function renderHistogrammeDepenses(depenses, monnaieId) {
-  const container = document.getElementById("dashboard-histogramme");
+/**
+ * L'histogramme des dépenses par catégorie.
+ *
+ * `container` PLUTÔT QU'UN IDENTIFIANT CÂBLÉ : ce graphe n'est plus le seul du
+ * dashboard. Un projet (extension « Projets ») affiche le sien, avec les mêmes
+ * barres, les mêmes couleurs et la même infobulle — c'est exactement ce qu'on
+ * veut, et un second rendu parallèle aurait fini par ne plus lui ressembler.
+ * Le conteneur du dashboard reste la valeur par défaut, les appels d'origine
+ * n'ont donc rien à dire de plus.
+ *
+ * Le conteneur doit être positionné en relatif : l'infobulle s'y place en
+ * absolu (cf. .histo-bulle et placerInfobulleHistogramme).
+ */
+function renderHistogrammeDepenses(depenses, monnaieId, container = null) {
+  container = container || document.getElementById("dashboard-histogramme");
+  if (!container) return;
   container.innerHTML = "";
   if (depenses.length === 0) {
     container.innerHTML = `<span class="hint">${t("Aucune dépense enregistrée.")}</span>`;
@@ -1814,6 +1930,226 @@ function renderHistogrammeDepenses(depenses, monnaieId) {
     });
   });
 }
+
+/* ---------- Le détail par semaine de l'histogramme ---------- */
+
+/**
+ * LES SEMAINES DU MOIS, sous la rangée des mois, et le MÊME histogramme.
+ *
+ * CE QUE ÇA AJOUTE. Une barre mensuelle dit ce qu'une catégorie a coûté, jamais
+ * QUAND : trois cents euros de courses peuvent être quatre semaines régulières
+ * ou un seul samedi, et rien à l'écran ne permettait de les distinguer.
+ *
+ * UN CRAN DE PLUS DU SÉLECTEUR DE PÉRIODE, et pas un second graphe. Année,
+ * mois, semaine : c'est la même arborescence qui descend, et l'histogramme
+ * dessous montre le niveau choisi. Deux graphes l'un sous l'autre auraient
+ * demandé de comparer deux échelles pour lire une seule chose.
+ *
+ * REPLIÉ D'ORIGINE : on regarde un mois neuf fois sur dix. La flèche déplie,
+ * recliquer la semaine active rend l'histogramme au mois entier, et replier
+ * fait la même chose — on ne peut pas rester coincé dans une semaine.
+ *
+ * LA BASCULE « MOYENNE » répond à ce qu'une semaine seule laisse ouvert :
+ * celle-ci est-elle une semaine ordinaire ? C'est la moyenne des semaines
+ * affichées, bouts de mois compris.
+ *
+ * EN VUE ANNÉE, RIEN : les semaines découpent un mois.
+ */
+
+// La réponse de /dashboard/semaines pour la période et la monnaie affichées.
+// Relue à chaque changement de l'une ou de l'autre ; gardée pour que basculer
+// d'une semaine à l'autre, ou vers la moyenne, ne coûte pas un aller-retour.
+let dashboardSemainesDonnees = null;
+
+/** La semaine regardée, ou null quand c'est le mois entier. */
+function semaineChoisie() {
+  const choix = state.dashboardSemaines.choix;
+  if (choix == null || !dashboardSemainesDonnees) return null;
+  if (choix === "moyenne") return { moyenne: true };
+  return (dashboardSemainesDonnees.semaines || []).find((s) => s.numero === choix) || null;
+}
+
+/**
+ * L'histogramme du dashboard — mois, semaine ou moyenne selon ce qui est
+ * choisi.
+ *
+ * TOUT PASSE PAR ICI, y compris les rendus déclenchés par une extension (la
+ * vue convertie de « Monnaies » rappelle `renderKpisDashboard`) : c'est ce qui
+ * empêche un rendu venu d'ailleurs de ramener le mois sous une rangée de
+ * semaines où l'une est cochée.
+ */
+function renderHistogrammeDashboard(depensesDuMois, monnaieId) {
+  const semaine = semaineChoisie();
+  const container = document.getElementById("dashboard-histogramme");
+  if (semaine === null) {
+    renderHistogrammeDepenses(depensesDuMois, monnaieId, container);
+    return;
+  }
+  renderHistogrammeDepenses(
+    semaine.moyenne ? dashboardSemainesDonnees.moyenne || [] : semaine.depenses || [],
+    monnaieId,
+    container
+  );
+}
+
+/**
+ * Ce que le titre « Dépenses par catégorie — … » annonce.
+ *
+ * LE TITRE PORTE LA PÉRIODE, plutôt qu'une phrase d'explication sous les
+ * onglets : il est déjà là, il est déjà lu, et c'est exactement ce qu'il dit.
+ */
+function libellePeriodeHistogramme(annee, mois) {
+  if (state.dashboardPeriode.vue === "annee") return t("année {annee}", { annee });
+  const semaine = semaineChoisie();
+  const nomMois = libelleMois(annee, mois).toLowerCase();
+  if (semaine === null) return nomMois;
+  if (semaine.moyenne) {
+    return t("moyenne des {n} semaines de {mois}", {
+      n: (dashboardSemainesDonnees.semaines || []).length,
+      mois: nomMois,
+    });
+  }
+  return t("du {debut} au {fin} {mois}", {
+    debut: semaine.jour_debut,
+    fin: semaine.jour_fin,
+    mois: nomMois,
+  });
+}
+
+function majTitrePeriodeHistogramme(annee, mois) {
+  document.getElementById("dashboard-periode-libelle").textContent =
+    libellePeriodeHistogramme(annee, mois);
+}
+
+/**
+ * Dessine la flèche et montre (ou cache) la rangée, d'après le seul
+ * `state.dashboardSemaines.ouvert`.
+ *
+ * UN SEUL ENDROIT qui touche à l'apparence de la flèche : elle change à trois
+ * occasions — au chargement de la page, au clic, et quand la vue année la fait
+ * disparaître — et trois recopies de la même paire de lignes auraient fini par
+ * ne plus dire la même chose.
+ */
+function majBoutonSemaines() {
+  const ouvert = state.dashboardSemaines.ouvert;
+  const bouton = document.getElementById("btn-dashboard-semaines");
+  bouton.innerHTML = ouvert ? ICONE_CHEVRON_HAUT : ICONE_CHEVRON_BAS;
+  bouton.setAttribute("aria-expanded", String(ouvert));
+  bouton.title = ouvert ? t("Replier les semaines") : t("Détailler par semaine");
+  bouton.setAttribute("aria-label", bouton.title);
+  document.getElementById("dashboard-periode-semaines").hidden = !ouvert;
+}
+
+/** Replie la rangée et rend l'histogramme au mois entier. */
+function replierSemaines() {
+  state.dashboardSemaines.ouvert = false;
+  state.dashboardSemaines.choix = null;
+  majBoutonSemaines();
+}
+
+/**
+ * Charge (si besoin) les semaines et redessine la rangée. Appelée à chaque
+ * chargement du dashboard : c'est elle qui décide si la flèche a lieu d'être,
+ * et qui relit les semaines quand le mois ou la monnaie ont changé sous une
+ * rangée déjà dépliée.
+ */
+async function majDetailSemaines(annee, mois) {
+  const ligne = document.getElementById("dashboard-periode-semaines-ligne");
+  const monnaieId = state.dashboardMonnaieId;
+
+  // Vue année, ou aucune monnaie en jeu (base sans compte) : rien à déplier.
+  if (state.dashboardPeriode.vue === "annee" || monnaieId == null) {
+    ligne.style.display = "none";
+    dashboardSemainesDonnees = null;
+    replierSemaines();
+    majTitrePeriodeHistogramme(annee, mois);
+    return;
+  }
+  ligne.style.display = "";
+  // La flèche est redessinée à chaque chargement : au premier, le bouton du
+  // HTML est encore vide.
+  majBoutonSemaines();
+  if (!state.dashboardSemaines.ouvert) {
+    majTitrePeriodeHistogramme(annee, mois);
+    return;
+  }
+
+  try {
+    dashboardSemainesDonnees = await apiFetch(
+      `/dashboard/semaines?annee=${annee}&mois=${mois}&monnaie_id=${monnaieId}`
+    );
+  } catch (err) {
+    showMessage(err.message, "error");
+    replierSemaines();
+    majTitrePeriodeHistogramme(annee, mois);
+    return;
+  }
+  renderRangeeSemaines(annee, mois);
+}
+
+/**
+ * Les onglets de semaine (plus « Moyenne »), et le graphe du choix courant.
+ *
+ * L'onglet actif retombe sur le mois entier quand la semaine qu'on regardait
+ * n'existe plus : février n'a pas le même nombre de semaines que mars, et
+ * passer de l'un à l'autre laissait sinon un onglet actif sans graphe derrière.
+ */
+function renderRangeeSemaines(annee, mois) {
+  const donnees = dashboardSemainesDonnees;
+  if (!donnees) return;
+  const semaines = donnees.semaines || [];
+  const choix = state.dashboardSemaines.choix;
+  if (choix !== null && choix !== "moyenne" && !semaines.some((s) => s.numero === choix)) {
+    state.dashboardSemaines.choix = null;
+  }
+
+  const rangee = document.getElementById("dashboard-periode-semaines");
+  rangee.innerHTML = "";
+  const boutons = semaines.map((semaine) => ({
+    cle: semaine.numero,
+    // Les JOURS et non « S1 » : c'est la date qu'on a en tête en cherchant un
+    // achat, pas le rang de la semaine dans le mois.
+    libelle: `${semaine.jour_debut} → ${semaine.jour_fin}`,
+  }));
+  boutons.push({ cle: "moyenne", libelle: t("Moyenne") });
+
+  boutons.forEach(({ cle, libelle }) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = libelle;
+    if (cle === state.dashboardSemaines.choix) btn.classList.add("active");
+    // « Moyenne » est d'une autre nature que les semaines : elle ne montre pas
+    // une période mais leur résumé. Une classe la distingue, sans la sortir de
+    // la rangée — c'est bien un des choix possibles.
+    if (cle === "moyenne") btn.classList.add("semaine-moyenne");
+    btn.addEventListener("click", () => {
+      // Recliquer le choix actif revient au mois entier : c'est la sortie la
+      // plus directe, et elle évite un onglet « Mois » qui ne servirait qu'à ça.
+      state.dashboardSemaines.choix =
+        state.dashboardSemaines.choix === cle ? null : cle;
+      renderRangeeSemaines(annee, mois);
+    });
+    rangee.appendChild(btn);
+  });
+
+  majTitrePeriodeHistogramme(annee, mois);
+  renderHistogrammeDashboard(dashboardDepensesDuMois, state.dashboardMonnaieId);
+}
+
+document.getElementById("btn-dashboard-semaines").addEventListener("click", async () => {
+  const { annee, mois } = state.dashboardPeriode;
+  if (state.dashboardSemaines.ouvert) {
+    // Replier rend l'histogramme au mois : on ne peut pas rester coincé dans
+    // une semaine qu'on ne voit plus.
+    replierSemaines();
+    majTitrePeriodeHistogramme(annee, mois);
+    renderHistogrammeDashboard(dashboardDepensesDuMois, state.dashboardMonnaieId);
+    return;
+  }
+  state.dashboardSemaines.ouvert = true;
+  majBoutonSemaines();
+  await majDetailSemaines(annee, mois);
+});
 
 /* ---------- Bloc-notes du dashboard ---------- */
 
@@ -2864,8 +3200,18 @@ function updateOperationTypeFields() {
   document.getElementById("operation-compte-bloc").style.display = estVirement ? "none" : "";
   document.getElementById("operation-compte1-bloc").style.display = estVirement ? "" : "none";
   document.getElementById("operation-compte2-bloc").style.display = estVirement ? "" : "none";
+  // LA DÉCOUPE REMPLACE LA CATÉGORIE UNIQUE, elle ne s'y ajoute pas : les deux
+  // répondent à la même question, et les montrer ensemble aurait laissé croire
+  // qu'on peut classer deux fois la même dépense.
+  const estDecoupable = type === TYPE_DECOUPABLE;
+  // Décochée dès qu'elle cesse d'être proposée : une case cochée mais invisible
+  // continuerait d'envoyer des parts que le serveur refuserait pour ce type.
+  if (!estDecoupable) document.getElementById("operation-decoupee").checked = false;
+  const decoupee = decoupeEstActive();
+  document.getElementById("operation-decoupee-bloc").style.display = estDecoupable ? "" : "none";
+  document.getElementById("operation-decoupe-bloc").style.display = decoupee ? "" : "none";
   document.getElementById("operation-categorie-bloc").style.display =
-    TYPES_CATEGORIE_LIBRE.has(type) ? "" : "none";
+    TYPES_CATEGORIE_LIBRE.has(type) && !decoupee ? "" : "none";
   document.getElementById("operation-statut-bloc").style.display =
     estReglement || estPret ? "none" : "";
 
@@ -3342,6 +3688,341 @@ document.getElementById("operation-montant-du").addEventListener("input", () => 
   montantDuAutoSync = false;
 });
 
+/* ---------- Découpe d'une opération ---------- */
+/*
+ * UNE OPÉRATION, PLUSIEURS CATÉGORIES. Un plein de courses à 120 € dont 30 €
+ * de produits ménagers reste UNE ligne au relevé et UN mouvement de compte :
+ * la découper en deux opérations aurait fait diverger le solde de l'app du
+ * relevé bancaire (cf. models.OperationDecoupe).
+ *
+ * LE TOTAL DES PARTS DOIT VALOIR LE MONTANT, et l'écran le dit pendant la
+ * saisie. Le serveur refuse le contraire en 400 ; l'annoncer seulement à
+ * l'enregistrement aurait obligé à recompter de tête pour comprendre le refus.
+ */
+
+// Réservée au type `classique` : les autres portent une catégorie imposée, un
+// montant dû ou une contrepartie, que la découpe ne saurait pas répartir.
+const TYPE_DECOUPABLE = "classique";
+
+function decoupeEstActive() {
+  return (
+    document.getElementById("operation-type").value === TYPE_DECOUPABLE &&
+    document.getElementById("operation-decoupee").checked
+  );
+}
+
+function lignesDecoupe() {
+  return [...document.querySelectorAll("#operation-decoupe-parts .decoupe-part")];
+}
+
+function lireDecoupes() {
+  return lignesDecoupe()
+    .map((ligne) => ({
+      categorie_id: Number(ligne.querySelector(".decoupe-categorie").value),
+      montant: parseFloat(ligne.querySelector(".decoupe-montant").value || "0"),
+    }))
+    // Une part à zéro ne classe rien : elle vaut une part qu'on n'a pas encore
+    // remplie, pas une part vide qu'il faudrait envoyer (le serveur la
+    // refuserait, cf. schemas.DecoupeInput).
+    .filter((part) => part.categorie_id && part.montant > 0);
+}
+
+function ajouterPartDecoupe(categorieId = null, montant = null) {
+  const conteneur = document.getElementById("operation-decoupe-parts");
+  const ligne = document.createElement("div");
+  ligne.className = "decoupe-part";
+  ligne.innerHTML = `
+    <select class="decoupe-categorie"></select>
+    <input type="number" step="0.01" min="0" class="decoupe-montant"
+           placeholder="0.00" value="${montant != null ? montant : ""}" />
+    <button type="button" class="decoupe-retirer danger"
+            title="${escapeHtml(t("Retirer cette part"))}"
+            aria-label="${escapeHtml(t("Retirer cette part"))}">&times;</button>
+  `;
+  conteneur.appendChild(ligne);
+  const select = ligne.querySelector(".decoupe-categorie");
+  fillCategoriesSelect(select, categoriesEligibles(TYPE_DECOUPABLE));
+  if (categorieId != null) select.value = categorieId;
+  majTotalDecoupe();
+}
+
+/**
+ * Le compteur du garde-fou : ce qui est réparti, et ce qui reste à placer.
+ *
+ * Le reste est affiché plutôt que seulement signalé : c'est le nombre qu'on
+ * s'apprête à taper dans la part suivante, et le calculer de tête à chaque
+ * ligne est exactement le travail que cet écran doit éviter.
+ */
+function majTotalDecoupe() {
+  const total = lireDecoupes().reduce((somme, part) => somme + part.montant, 0);
+  const montant = parseFloat(document.getElementById("operation-montant").value || "0");
+  const reste = Math.round((montant - total) * 100) / 100;
+  const element = document.getElementById("operation-decoupe-total");
+  const monnaieId = Number(document.getElementById("operation-monnaie").value) || null;
+  element.textContent =
+    reste === 0
+      ? `${t("Réparti")} : ${formatMontant(total, monnaieId)}`
+      : `${t("Réparti")} : ${formatMontant(total, monnaieId)} — ` +
+        `${t("reste à placer")} : ${formatMontant(reste, monnaieId)}`;
+  element.classList.toggle("erreur", reste !== 0);
+}
+
+/**
+ * Ce qui empêche d'enregistrer cette découpe, ou null.
+ *
+ * Les mêmes refus que le serveur (cf. crud.erreur_decoupes), dits ici avec les
+ * mots de l'écran. Ce n'est PAS un doublon inutile : sans ce contrôle, la seule
+ * façon d'apprendre qu'il manque dix euros serait un message d'erreur après
+ * l'enregistrement, sur un formulaire qu'on vient de quitter des yeux.
+ */
+function erreurDecoupe() {
+  if (!decoupeEstActive()) return null;
+  const parts = lireDecoupes();
+  if (parts.length < 2) {
+    return t("Une découpe compte au moins deux parts remplies.");
+  }
+  const categories = parts.map((part) => part.categorie_id);
+  if (new Set(categories).size !== categories.length) {
+    return t("Une même catégorie ne peut pas apparaître deux fois dans la découpe.");
+  }
+  const total = parts.reduce((somme, part) => somme + part.montant, 0);
+  const montant = parseFloat(document.getElementById("operation-montant").value || "0");
+  if (Math.abs(total - montant) > 0.005) {
+    return (
+      t("Le total des parts doit valoir le montant de l'opération.") +
+      ` (${total.toFixed(2)} / ${montant.toFixed(2)})`
+    );
+  }
+  return null;
+}
+
+/**
+ * Ce que le formulaire envoie pour la découpe.
+ *
+ * `[]` et non « rien » quand la case est décochée : sur une modification, c'est
+ * ce qui EFFACE les parts d'une opération qui en portait (cf.
+ * schemas.OperationUpdate.decoupes, où `null` veut dire « n'y touche pas »).
+ * Ne rien envoyer aurait laissé la découpe en place tout en affichant une
+ * catégorie unique.
+ */
+function decoupePayload() {
+  if (!decoupeEstActive()) return { decoupes: [] };
+  // La catégorie unique part avec : les deux répondent à la même question, et
+  // le serveur met de toute façon `categorie_id` à NULL sur une opération
+  // découpée.
+  return { decoupes: lireDecoupes(), categorie_id: null };
+}
+
+function remplirDecoupe(op) {
+  const parts = op && op.decoupes ? op.decoupes : [];
+  document.getElementById("operation-decoupe-parts").innerHTML = "";
+  document.getElementById("operation-decoupee").checked = parts.length > 0;
+  parts.forEach((part) => ajouterPartDecoupe(part.categorie_id, part.montant));
+  majTotalDecoupe();
+}
+
+document.getElementById("operation-decoupee").addEventListener("change", () => {
+  // Deux parts d'emblée : une découpe en compte au moins deux, et cocher la
+  // case pour se retrouver devant une liste vide obligerait à deviner le geste
+  // suivant.
+  if (decoupeEstActive() && lignesDecoupe().length === 0) {
+    ajouterPartDecoupe();
+    ajouterPartDecoupe();
+  }
+  updateOperationTypeFields();
+});
+
+document
+  .getElementById("operation-decoupe-ajouter")
+  .addEventListener("click", () => ajouterPartDecoupe());
+
+// Délégués sur le conteneur : les lignes naissent et meurent au fil de la
+// saisie, et poser un écouteur sur chacune les ferait fuir à chaque retrait.
+document.getElementById("operation-decoupe-parts").addEventListener("click", (evenement) => {
+  const bouton = evenement.target.closest(".decoupe-retirer");
+  if (!bouton) return;
+  bouton.closest(".decoupe-part").remove();
+  majTotalDecoupe();
+});
+document
+  .getElementById("operation-decoupe-parts")
+  .addEventListener("input", majTotalDecoupe);
+// Le montant de l'opération est l'autre terme de la comparaison : le compteur
+// doit suivre quand c'est LUI qui change, pas seulement les parts.
+document.getElementById("operation-montant").addEventListener("input", () => {
+  if (decoupeEstActive()) majTotalDecoupe();
+});
+
+
+/* ---------- Frais d'une opération ----------
+ *
+ * CE QU'ILS SONT. Des frais sont DÉJÀ compris dans le montant enregistré :
+ * ajoutés à ce qui sort, retranchés de ce qui entre (cf.
+ * services/import_bancaire._appliquer_frais, et models.Operation.frais qui les
+ * conserve). Le montant reste ce qui a bougé sur le compte ; les frais disent
+ * seulement de quoi il est fait.
+ *
+ * CE QUE LE FORMULAIRE EN FAIT. Il les ressort : le champ « Montant » passe
+ * HORS FRAIS et une case « Frais » apparaît à côté, exactement comme dans
+ * l'aperçu d'import. Sans cela, un montant de 102 € ne disait plus qu'il
+ * contenait 2 € de frais, et corriger l'un des deux était impossible.
+ *
+ * SEULEMENT QUAND L'OPÉRATION EN PORTE. Une ligne sur cent en a : deux champs
+ * de plus sur chaque saisie ordinaire coûteraient plus qu'ils ne rendent. La
+ * case apparaît à l'édition d'une opération qui a des frais, et disparaît si on
+ * les remet à zéro.
+ *
+ * SUR UN VIREMENT, ILS NE GRÈVENT QU'UNE JAMBE — celle que leur devise désigne
+ * (cf. crud._jambe_des_frais). C'est donc le champ de CETTE jambe-là qui passe
+ * hors frais, « Montant envoyé » ou « Montant reçu ».
+ */
+
+// L'opération en cours d'édition porte-t-elle des frais, de quel côté, et dans
+// quel sens ?
+//
+//  - `cote` : "envoye" (le champ Montant) ou "recu" (le champ Montant reçu) ;
+//  - `sortante` : le montant grevé est-il une SORTIE (frais ajoutés) ou une
+//    entrée (frais retranchés). RETENU DE L'AFFICHAGE plutôt que redéduit à
+//    l'enregistrement : c'est le sens qui a servi à montrer le montant hors
+//    frais, et recomposer avec un autre rendrait un montant qui n'est ni celui
+//    d'avant ni celui qu'on voulait.
+let operationFrais = { actif: false, cote: "envoye", sortante: true };
+
+/**
+ * Le montant tel qu'il sera enregistré, frais compris.
+ *
+ * MIROIR EXACT de `_grever` côté serveur : des frais font toujours perdre de la
+ * valeur — ils s'ajoutent à ce qui part, se retranchent de ce qui arrive.
+ */
+function montantAvecFrais(horsFrais, frais, sortante) {
+  if (!frais) return horsFrais;
+  return sortante ? horsFrais + frais : horsFrais - frais;
+}
+
+/** L'inverse : ce que le champ doit AFFICHER, frais déduits. */
+function montantHorsFrais(montant, frais, sortante) {
+  if (!frais) return montant;
+  return sortante ? montant - frais : montant + frais;
+}
+
+/**
+ * Montre (ou cache) les deux champs de frais, et adapte les libellés des
+ * montants pour dire lequel est hors frais.
+ */
+function majChampsFraisOperation() {
+  const actif = operationFrais.actif;
+  document.getElementById("operation-frais-bloc").style.display = actif ? "" : "none";
+  // La devise des frais ne se choisit que s'il y en a deux en jeu : sur un
+  // virement mono-monnaie comme sur une opération ordinaire, elle est celle du
+  // montant et n'a rien à demander.
+  const choixDevise =
+    actif &&
+    document.getElementById("operation-montant-recu-bloc").style.display !== "none";
+  document.getElementById("operation-monnaie-frais-bloc").style.display = choixDevise
+    ? ""
+    : "none";
+
+  const suffixe = actif ? " (hors frais)" : "";
+  const labelMontant = document.getElementById("operation-montant-label");
+  // Le libellé de base est posé par updateOperationMonnaieFields : on ne fait
+  // qu'y accoler la mention, sans quoi « Montant envoyé » redeviendrait
+  // « Montant » dès qu'on affiche les frais.
+  const base = labelMontant.textContent.replace(" (hors frais)", "");
+  labelMontant.textContent =
+    base + (actif && operationFrais.cote === "envoye" ? suffixe : "");
+  const blocRecu = document.getElementById("operation-montant-recu-bloc");
+  const noeudRecu = blocRecu.firstChild;
+  if (noeudRecu && noeudRecu.nodeType === Node.TEXT_NODE) {
+    noeudRecu.nodeValue =
+      "Montant reçu" + (actif && operationFrais.cote === "recu" ? suffixe : "");
+  }
+}
+
+/**
+ * Remplit le menu de devise des frais avec les monnaies EN JEU dans
+ * l'opération — celle qui part et celle qui arrive, et rien d'autre : des frais
+ * dans une troisième devise ne s'appliqueraient à aucun des deux montants, ce
+ * que le serveur refuse déjà à l'import.
+ */
+function remplirMonnaieFraisOperation(monnaieFraisId) {
+  const select = document.getElementById("operation-monnaie-frais");
+  const ids = [
+    Number(document.getElementById("operation-monnaie").value) || null,
+    Number(document.getElementById("operation-monnaie-recue").value) || null,
+  ].filter((id, i, tous) => id && tous.indexOf(id) === i);
+  select.innerHTML = ids
+    .map((id) => {
+      const monnaie = monnaieParId(id);
+      return `<option value="${id}">${escapeHtml(monnaie ? monnaie.nom : `#${id}`)}</option>`;
+    })
+    .join("");
+  if (monnaieFraisId && ids.includes(monnaieFraisId)) select.value = String(monnaieFraisId);
+}
+
+/**
+ * Prépare le formulaire pour une opération qui porte des frais : la case
+ * apparaît, et le montant du côté grevé s'affiche hors frais.
+ *
+ * `sortante` dit si le montant grevé est une SORTIE (frais ajoutés) ou une
+ * entrée (frais retranchés) — c'est ce qui décide du sens de la déduction.
+ */
+function poserFraisOperation({ frais, monnaieFraisId, cote, sortante, champ }) {
+  operationFrais = { actif: Boolean(frais), cote, sortante };
+  if (!operationFrais.actif) {
+    majChampsFraisOperation();
+    return;
+  }
+  document.getElementById("operation-frais").value = frais;
+  remplirMonnaieFraisOperation(monnaieFraisId);
+  const element = document.getElementById(champ);
+  const montant = parseFloat(element.value);
+  if (!isNaN(montant)) {
+    element.value = arrondiMontant(montantHorsFrais(montant, frais, sortante));
+  }
+  majChampsFraisOperation();
+}
+
+/** Deux décimales, sans traîner les flottants (102 - 2 = 99.99999999999999). */
+function arrondiMontant(valeur) {
+  return Math.round(valeur * 100) / 100;
+}
+
+/**
+ * Ce qu'une opération À UN SEUL COMPTE doit enregistrer : son montant frais
+ * compris, et les frais eux-mêmes.
+ *
+ * Le sens de la recomposition est celui retenu à l'affichage
+ * (`operationFrais.sortante`) : les frais s'ajoutent à ce qui part, se
+ * retranchent de ce qui entre.
+ */
+function montantEtFraisOperation() {
+  const sortante = operationFrais.sortante;
+  const saisi = parseFloat(document.getElementById("operation-montant").value);
+  const { frais, monnaie_frais_id: monnaieFrais } = fraisSaisisOperation();
+  return {
+    montant: arrondiMontant(montantAvecFrais(saisi, frais, sortante)),
+    frais,
+    // Sur une opération à un seul compte, la devise des frais est forcément
+    // celle du montant : le menu n'est même pas proposé.
+    monnaie_frais_id: frais
+      ? monnaieFrais || Number(document.getElementById("operation-monnaie").value) || null
+      : null,
+  };
+}
+
+/** Ce que le formulaire porte comme frais, ou rien. */
+function fraisSaisisOperation() {
+  if (!operationFrais.actif) return { frais: null, monnaie_frais_id: null };
+  const valeur = parseFloat(document.getElementById("operation-frais").value);
+  if (isNaN(valeur) || valeur <= 0) return { frais: null, monnaie_frais_id: null };
+  const bloc = document.getElementById("operation-monnaie-frais-bloc");
+  const monnaie =
+    bloc.style.display === "none"
+      ? null
+      : Number(document.getElementById("operation-monnaie-frais").value) || null;
+  return { frais: valeur, monnaie_frais_id: monnaie };
+}
+
 function resetOperationForm() {
   document.getElementById("operation-id").value = "";
   document.getElementById("operation-date").value = "";
@@ -3358,6 +4039,11 @@ function resetOperationForm() {
   document.getElementById("operation-montant-du").disabled = false;
   document.getElementById("operation-rembourse-info").style.display = "none";
   document.getElementById("operation-remboursements-liste").innerHTML = "";
+  // Les frais n'existent qu'à l'édition d'une opération qui en porte : une
+  // création repart sans la case (cf. § « Frais d'une opération »).
+  document.getElementById("operation-frais").value = "";
+  operationFrais = { actif: false, cote: "envoye", sortante: true };
+  majChampsFraisOperation();
   // Les notes n'existent qu'à l'édition : une création repart sans champ.
   document.getElementById("operation-notes").value = "";
   document.getElementById("operation-notes-bloc").style.display = "none";
@@ -3375,6 +4061,7 @@ function resetOperationForm() {
   champsMoisAmortissement.debut.value = "";
   champsMoisAmortissement.fin.value = "";
   document.getElementById("operation-amortissement-nb-mois").value = "";
+  remplirDecoupe(null);
   setOperationType("classique");
 }
 
@@ -3410,6 +4097,10 @@ async function fillOperationForm(op) {
 
   // setOperationType ci-dessus a déjà positionné la visibilité des blocs
   // récurrence et amortissement selon l'état par défaut des cases (décochées) :
+  // AVANT updateOperationTypeFields, qui lit la case « découpée » pour décider
+  // d'afficher les parts ou la catégorie unique.
+  remplirDecoupe(op);
+
   // la recalculer maintenant que leurs vraies valeurs sont connues.
   updateOperationTypeFields();
 
@@ -3418,11 +4109,13 @@ async function fillOperationForm(op) {
   // Après le compte : les monnaies proposées sont celles de CE compte.
   updateOperationMonnaieFields();
   document.getElementById("operation-monnaie").value = op.monnaie_id;
-  if (TYPES_CATEGORIE_LIBRE.has(type)) {
+  if (TYPES_CATEGORIE_LIBRE.has(type) && op.categorie_id != null) {
     document.getElementById("operation-categorie").value = op.categorie_id;
   }
   document.getElementById("operation-nature").value = op.nature;
   document.getElementById("operation-montant").value = op.montant;
+  // Après le montant : le compteur du garde-fou compare les parts à LUI.
+  majTotalDecoupe();
   document.getElementById("operation-statut").value = op.statut;
   document.getElementById("operation-montant-du").value = op.montant_du;
   document.getElementById("operation-montant-a-rembourser").value = op.montant_a_rembourser;
@@ -3453,6 +4146,17 @@ async function fillOperationForm(op) {
 
   document.getElementById("operation-notes").value = op.notes || "";
   document.getElementById("operation-notes-bloc").style.display = "";
+
+  // APRÈS le montant : c'est lui que la déduction retouche. Une opération qui
+  // sort porte ses frais en plus, une qui entre les porte en moins (cf. § « Frais
+  // d'une opération »).
+  poserFraisOperation({
+    frais: op.frais,
+    monnaieFraisId: op.monnaie_frais_id,
+    cote: "envoye",
+    sortante: op.sens !== "entrée",
+    champ: "operation-montant",
+  });
 
   document.getElementById("form-operation-titre").textContent = "Modifier l'opération";
   document.getElementById("operation-annuler").style.display = "inline-block";
@@ -3581,6 +4285,12 @@ function buildOperationsQuery() {
   // que les opérations à montant nul), et un `if (montantMin)` l'aurait avalée.
   if (montantMin !== "") params.set("montant_min", montantMin);
   if (montantMax !== "") params.set("montant_max", montantMax);
+  // UN VIREMENT EST INDIVISIBLE, et cet écran l'affiche par paire : sans ce
+  // drapeau, filtrer sur un compte ne ramenait que la jambe qui le touche, et
+  // le virement s'affichait avec « - » en face — comme s'il lui manquait un
+  // compte. Le message d'édition envoyait alors chercher dans l'import une
+  // opération qui n'avait jamais rien eu d'incomplet.
+  params.set("paires_virement", "true");
   return params.toString();
 }
 
@@ -3678,10 +4388,28 @@ let virementEnEdition = null;
  */
 async function editerVirementEnLigne(virementId, sortante, entrante, tr) {
   if (!sortante || !entrante) {
-    // Virement importé dont le second compte est resté inconnu : il n'y a
-    // qu'une écriture, la paire n'existe pas.
-    showMessage(t("Ce virement n'a qu'une écriture (second compte inconnu à l'import) : ") +
-        "supprime-la et recrée le virement avec ses deux comptes.",
+    // DEUX CAUSES, ET ELLES N'APPELLENT PAS LE MÊME GESTE. Le message ne le
+    // distinguait pas et accusait toujours l'import : devant un virement
+    // parfaitement complet en base, il envoyait le refaire, ce qui ne changeait
+    // évidemment rien.
+    //
+    //   - clé `solo-<id>` : l'écriture ne porte AUCUN virement_id. C'est une
+    //     jambe seule, héritée d'un import d'avant que l'app refuse les
+    //     virements sans compte en face — là, il faut bien la recréer ;
+    //   - clé = un virement_id : la paire EXISTE, mais sa seconde jambe n'est
+    //     pas dans la liste. Un filtre l'a écartée (elle est sur un autre
+    //     compte, ou porte un autre montant en cas de change).
+    const seule = String(virementId).startsWith("solo-");
+    showMessage(
+      seule
+        ? t(
+            "Cette écriture n'a pas de seconde jambe (virement importé sans compte en face) : " +
+              "supprime-la et recrée le virement avec ses deux comptes."
+          )
+        : t(
+            "La seconde écriture de ce virement n'est pas dans la liste affichée : " +
+              "vide les filtres pour la modifier."
+          ),
       "error"
     );
     return;
@@ -3704,6 +4432,18 @@ async function editerVirementEnLigne(virementId, sortante, entrante, tr) {
   updateOperationMonnaieFields();
   document.getElementById("operation-montant").value = sortante.montant;
   document.getElementById("operation-montant-recu").value = entrante.montant;
+  // LES FRAIS NE SONT PORTÉS QUE PAR UNE JAMBE (cf. crud._jambe_des_frais) :
+  // c'est le champ de celle-là qui passe hors frais. Sur la sortante ils ont été
+  // ajoutés (102 € partis pour 100 € virés), sur l'entrante retranchés (98 €
+  // reçus pour 100 € envoyés).
+  const jambeFrais = sortante.frais ? sortante : entrante.frais ? entrante : null;
+  poserFraisOperation({
+    frais: jambeFrais ? jambeFrais.frais : null,
+    monnaieFraisId: jambeFrais ? jambeFrais.monnaie_frais_id : null,
+    cote: jambeFrais === entrante ? "recu" : "envoye",
+    sortante: jambeFrais !== entrante,
+    champ: jambeFrais === entrante ? "operation-montant-recu" : "operation-montant",
+  });
   // La note est la même sur les deux jambes (cf. VirementCreate.notes) : celle
   // de la sortante fait foi.
   document.getElementById("operation-notes").value = sortante.notes || "";
@@ -3866,21 +4606,80 @@ function ligneSeparatriceJour(jour, nbColonnes) {
   return tr;
 }
 
+/**
+ * La cellule « Catégorie » d'une opération DÉCOUPÉE : le nombre de parts, et
+ * un bouton qui les déplie sous la ligne.
+ *
+ * DÉPLIABLE PLUTÔT QU'EMPILÉE : trois parts écrites les unes sous les autres
+ * dans la cellule feraient de chaque opération découpée une ligne trois fois
+ * plus haute que ses voisines, et le tableau perdrait le rythme qui le rend
+ * lisible. Le détail est à un clic, et il reste accessible au clavier — ce
+ * qu'une infobulle au survol n'aurait pas été.
+ */
+function celluleCategorieOperation(op) {
+  if (!op.decoupes || op.decoupes.length === 0) return nomCategorie(op.categorie_id);
+  const titre = t("Voir le détail de la découpe");
+  return (
+    `<button type="button" class="decoupe-bascule" data-bascule="decoupe-${op.id}"` +
+    ` aria-expanded="false" aria-controls="decoupe-${op.id}"` +
+    ` title="${escapeHtml(titre)}" aria-label="${escapeHtml(titre)}">` +
+    `${t("Découpée")} · ${op.decoupes.length} ${t("parts")}</button>`
+  );
+}
+
+/**
+ * La ligne repliée qui détaille les parts. Un `<tr>` à part et non un bloc
+ * dans la cellule : c'est le seul moyen de lui laisser toute la largeur du
+ * tableau sans casser l'alignement des colonnes au-dessus.
+ *
+ * Son `id` est celui que vise le bouton ci-dessus ; la bascule elle-même est
+ * le mécanisme générique de app.js (écouteur délégué sur `data-bascule`), qui
+ * ne fait que retourner l'attribut `hidden`.
+ */
+function ligneDetailDecoupe(op, nbColonnes) {
+  const tr = document.createElement("tr");
+  tr.id = `decoupe-${op.id}`;
+  tr.className = "decoupe-detail";
+  tr.hidden = true;
+  const parts = op.decoupes
+    .map(
+      (part) =>
+        `<li><span class="decoupe-detail-categorie">${escapeHtml(
+          nomCategorie(part.categorie_id)
+        )}</span>` +
+        `<span class="decoupe-detail-montant">${formatMontant(
+          part.montant,
+          op.monnaie_id
+        )}</span></li>`
+    )
+    .join("");
+  tr.innerHTML = `<td colspan="${nbColonnes}"><ul class="decoupe-detail-liste">${parts}</ul></td>`;
+  return tr;
+}
+
 function renderClassiques(liste) {
+  const nbColonnes = COLONNES_OPERATIONS.classique.length;
   const construireLigne = (op) => {
     const tr = document.createElement("tr");
+    if (op.decoupes && op.decoupes.length > 0) tr.classList.add("operation-decoupee");
     tr.innerHTML = `
       <td>${op.nature}</td>
       <td>${montantHtml(op.montant, op.sens, op.monnaie_id)}</td>
       <td>${nomCompte(op.compte_id)}</td>
-      <td>${nomCategorie(op.categorie_id)}</td>
+      <td>${celluleCategorieOperation(op)}</td>
       <td>${statutLabel(op.statut)}</td>
       <td>
         <button data-action="edit" data-id="${op.id}">${t("Modifier")}</button>
         <button data-action="delete" data-id="${op.id}" class="danger">${t("Supprimer")}</button>
       </td>
     `;
-    return tr;
+    if (!op.decoupes || op.decoupes.length === 0) return tr;
+    // Deux lignes pour une opération : un fragment les insère toutes les deux
+    // là où l'appelant n'en attend qu'une (cf. remplirListeOperations).
+    const fragment = document.createDocumentFragment();
+    fragment.appendChild(tr);
+    fragment.appendChild(ligneDetailDecoupe(op, nbColonnes));
+    return fragment;
   };
   const ponctuelles = liste.filter((o) => !o.recurrente);
   const recurrentes = liste.filter((o) => o.recurrente);
@@ -4531,15 +5330,36 @@ document.getElementById("form-operation").addEventListener("submit", async (e) =
         );
         return;
       }
+      // LES DEUX MONTANTS SONT SAISIS HORS FRAIS quand la case est là : on les
+      // recompose ici, du côté que les frais grèvent, pour enregistrer ce qui a
+      // réellement bougé sur chaque compte.
+      const { frais, monnaie_frais_id: monnaieFrais } = fraisSaisisOperation();
+      const montantEnvoye = montantAvecFrais(
+        montant,
+        operationFrais.cote === "envoye" ? frais : null,
+        true
+      );
+      const montantRecuBrut =
+        monnaieSource === monnaieDestination ? montant : parseFloat(montantRecuSaisi);
+      const montantRecu = montantAvecFrais(
+        montantRecuBrut,
+        operationFrais.cote === "recu" ? frais : null,
+        false
+      );
       const payload = {
         date: document.getElementById("operation-date").value,
         compte_source_id: Number(document.getElementById("operation-compte1").value),
         compte_destination_id: Number(document.getElementById("operation-compte2").value),
-        montant,
+        montant: montantEnvoye,
         monnaie_id: monnaieSource,
         monnaie_destination_id: monnaieDestination,
-        montant_destination:
-          monnaieSource === monnaieDestination ? montant : parseFloat(montantRecuSaisi),
+        montant_destination: montantRecu,
+        // La devise des frais dit laquelle des deux jambes ils grèvent : sans
+        // choix explicite (virement mono-monnaie), c'est celle du côté saisi.
+        frais,
+        monnaie_frais_id:
+          monnaieFrais ||
+          (frais ? (operationFrais.cote === "recu" ? monnaieDestination : monnaieSource) : null),
         nature: document.getElementById("operation-nature").value || null,
         statut: document.getElementById("operation-statut").value,
         ...champNotes,
@@ -4603,13 +5423,16 @@ document.getElementById("form-operation").addEventListener("submit", async (e) =
         showMessage(erreurAmorti, "error");
         return;
       }
+      const pret = montantEtFraisOperation();
       const payload = {
         date: document.getElementById("operation-date").value,
         compte_id: Number(document.getElementById("operation-compte").value),
         monnaie_id: Number(document.getElementById("operation-monnaie").value),
         type_id: idTypeOperation("pret"),
         nature,
-        montant: parseFloat(document.getElementById("operation-montant").value),
+        montant: pret.montant,
+        frais: pret.frais,
+        monnaie_frais_id: pret.monnaie_frais_id,
         statut: "réel",
         // CE QU'ON RENDRA, intérêts compris — au moins le montant reçu. L'écart
         // entre les deux est le seul coût du prêt, et la seule chose qui pèse
@@ -4643,7 +5466,13 @@ document.getElementById("form-operation").addEventListener("submit", async (e) =
         showMessage(erreurAmorti, "error");
         return;
       }
+      const erreurParts = erreurDecoupe();
+      if (erreurParts) {
+        showMessage(erreurParts, "error");
+        return;
+      }
       const categorieId = Number(document.getElementById("operation-categorie").value);
+      const simple = montantEtFraisOperation();
       const payload = {
         date: document.getElementById("operation-date").value,
         compte_id: Number(document.getElementById("operation-compte").value),
@@ -4651,10 +5480,16 @@ document.getElementById("form-operation").addEventListener("submit", async (e) =
         type_id: idTypeOperation(type),
         categorie_id: categorieId,
         nature,
-        montant: parseFloat(document.getElementById("operation-montant").value),
+        montant: simple.montant,
+        frais: simple.frais,
+        monnaie_frais_id: simple.monnaie_frais_id,
         statut: document.getElementById("operation-statut").value,
         ...champNotes,
         ...recurrencePayload(),
+        // EN DERNIER : sur une découpe, il écrase `categorie_id` par null —
+        // les deux répondent à la même question, et c'est la découpe qui
+        // l'emporte quand elle est là.
+        ...decoupePayload(),
         ...amortissementPayload(),
       };
       if (type === "remboursable") {
@@ -5486,15 +6321,34 @@ function normaliserMotCle(mot) {
  * noms ne servent qu'au message qui refuse un mot-clé déjà pris ailleurs dans
  * le groupe.
  *
+ * `vide` est la phrase affichée à la place des jetons quand la liste est vide.
+ * Elle change de sens d'un écran à l'autre — à l'import, une liste vide retombe
+ * sur les mots par défaut ; dans une règle, elle veut dire que la condition ne
+ * compare rien — d'où le réglage plutôt qu'une phrase câblée.
+ *
+ * `onChange(cle, mots)` est appelée après chaque ajout ou retrait. Elle sert aux
+ * écrans dont l'état vit ailleurs que dans l'éditeur : l'éditeur de règles garde
+ * ses conditions dans un brouillon qu'il redessine entièrement, et une liste
+ * qu'il faudrait aller relire au moment d'enregistrer aurait fini par diverger
+ * de ce qu'on voit.
+ *
+ * REDÉCLARER LE MÊME GROUPE SUR UN AUTRE ÉLÉMENT LE REMPLACE : un écran qui
+ * reconstruit son DOM (l'éditeur de règles, à chaque frappe sur un champ
+ * voisin) laisserait sinon l'éditeur pointer sur des nœuds détachés, et ses
+ * écouteurs ne serviraient plus rien. Redéclarer sur le MÊME élément ne fait
+ * rien, pour ne pas empiler deux jeux d'écouteurs.
+ *
  * DÉLÉGUÉS SUR LE CONTENEUR, une fois pour toutes les listes : le rendu réécrit
  * les jetons et le menu à chaque changement, des écouteurs posés dessus
  * partiraient avec eux.
  */
-function creerEditeurMotsCles(idGroupe, { conteneur, libelles }) {
+function creerEditeurMotsCles(idGroupe, { conteneur, libelles, vide, onChange } = {}) {
   const element =
     typeof conteneur === "string" ? document.getElementById(conteneur) : conteneur;
-  if (!element || editeursMotsCles.has(idGroupe)) return;
-  editeursMotsCles.set(idGroupe, { element, libelles, listes: {} });
+  if (!element) return;
+  const existant = editeursMotsCles.get(idGroupe);
+  if (existant && existant.element === element) return;
+  editeursMotsCles.set(idGroupe, { element, libelles, vide, onChange, listes: {} });
 
   element.addEventListener("click", (e) => {
     const bouton = e.target.closest(".import-vocabulaire-ajouter");
@@ -5551,9 +6405,11 @@ function renderMotsCles(idGroupe, cle) {
   if (mots.length === 0) {
     const vide = document.createElement("span");
     vide.className = "hint";
-    // Une liste vide n'est pas une erreur : elle retombe sur les mots par
-    // défaut, rappelés juste en dessous.
-    vide.textContent = t("Aucun mot-clé — les mots par défaut s'appliquent.");
+    // Ce que veut dire une liste vide dépend de l'écran : à l'import elle
+    // retombe sur les mots par défaut, dans une règle elle ne compare rien.
+    vide.textContent = t(
+      editeur.vide || "Aucun mot-clé — les mots par défaut s'appliquent."
+    );
     jetons.appendChild(vide);
   } else {
     mots.forEach((mot) => {
@@ -5564,9 +6420,11 @@ function renderMotsCles(idGroupe, cle) {
     });
   }
 
-  // Le menu de suppression : la même liste, mais actionnable. Il se referme
-  // après chaque retrait — le geste est fini, et le laisser ouvert sur une
-  // liste qui vient de changer invite à cliquer sur la mauvaise ligne.
+  // Le menu de suppression : la même liste, mais actionnable. IL RESTE OUVERT
+  // après un retrait — on en supprime rarement un seul, et se le voir refermer
+  // au visage à chaque clic obligeait à le rouvrir autant de fois qu'il y avait
+  // de mots à retirer. Seul son contenu est réécrit ; le <details> lui-même
+  // n'est pas reconstruit, il garde donc son état.
   const menu = bloc.querySelector("[data-role='menu']");
   menu.innerHTML = "";
   if (mots.length === 0) {
@@ -5582,10 +6440,17 @@ function renderMotsCles(idGroupe, cle) {
     ligne.className = "import-vocabulaire-menu-ligne";
     ligne.innerHTML = `<span>${escapeHtml(mot)}</span><span aria-hidden="true">&times;</span>`;
     ligne.setAttribute("aria-label", `${t("Supprimer")} ${mot}`);
-    ligne.addEventListener("click", () => {
+    ligne.addEventListener("click", (e) => {
+      // `stopPropagation` EST CE QUI GARDE LE MENU OUVERT. Le retrait réécrit
+      // le contenu du menu, si bien que le bouton cliqué n'a plus de parent
+      // quand le clic remonte au document — et le garde qui referme les menus
+      // « au clic ailleurs » le prenait justement pour un clic ailleurs. On en
+      // retire rarement un seul : se voir refermer le menu au visage obligeait
+      // à le rouvrir autant de fois qu'il y avait de mots à retirer.
+      e.stopPropagation();
       editeur.listes[cle].splice(i, 1);
-      bloc.querySelector("details").open = false;
       renderMotsCles(idGroupe, cle);
+      if (editeur.onChange) editeur.onChange(cle, [...editeur.listes[cle]]);
     });
     menu.appendChild(ligne);
   });
@@ -5636,6 +6501,7 @@ function ajouterMotCle(idGroupe, cle) {
   champ.value = "";
   champ.focus();
   renderMotsCles(idGroupe, cle);
+  if (editeur.onChange) editeur.onChange(cle, [...editeur.listes[cle]]);
 }
 
 // Un seul menu « Actualisation » ouvert à la fois, et refermé dès qu'on clique
@@ -5793,7 +6659,19 @@ function creerLigneConfigColonne(propriete, libelle, { actif }) {
   `;
 
   row.querySelector("input").addEventListener("input", (e) => {
-    if (colonne) colonne.index = Number(e.target.value) || 0;
+    if (!colonne) return;
+    colonne.index = Number(e.target.value) || 0;
+    // MÊME ÉTAT QU'UN EN-TÊTE DÉPLACÉ : le tableau du fichier ne montre plus ce
+    // que l'app a lu. Le bouton de relecture s'allume, ici comme là.
+    importApercuAReloire = true;
+    majBoutonRelireApercu();
+  });
+
+  // À la VALIDATION seulement (sortie du champ) : redessiner tout le tableau du
+  // fichier à chaque frappe coûterait cher sur un relevé de plusieurs centaines
+  // de lignes, pour un numéro qu'on est encore en train de taper.
+  row.querySelector("input").addEventListener("change", () => {
+    if (colonne) renderApercuFichier();
   });
 
   row.querySelector("button[data-action='basculer']").addEventListener("click", () => {
@@ -6173,6 +7051,31 @@ async function analyserFichierImport() {
  * de configuration : c'est exactement la même opération, seul le déclencheur
  * change.
  */
+/**
+ * Joint à une requête d'import LES COLONNES QUE L'ÉCRAN AFFICHE, et non celles
+ * que le preset porte en base.
+ *
+ * C'est ce qui permet de déplacer un en-tête (ou de corriger un numéro) et de
+ * voir le résultat sans avoir à enregistrer d'abord. Dans le cas ordinaire les
+ * deux sont identiques — `importConfigColonnes` est initialisée depuis le
+ * preset — et rien ne change.
+ *
+ * AUX DEUX REQUÊTES, aperçu ET confirmation, et c'est le point : le fichier
+ * doit être relu à l'identique des deux côtés, sinon on importerait autre chose
+ * que ce qu'on vient de valider. Même règle que le délimiteur et le séparateur
+ * décimal, juste au-dessus.
+ *
+ * Le serveur n'écrit rien de ce qu'on lui envoie là (cf.
+ * import_bancaire.PresetAvecColonnes) : seul « Enregistrer la configuration »
+ * touche au preset.
+ */
+function ajouterColonnesLues(formData) {
+  formData.append(
+    "colonnes",
+    JSON.stringify({ colonnes: importConfigColonnes.filter((c) => c.index >= 1) })
+  );
+}
+
 async function executerPrevisualisation() {
   const formData = new FormData();
   formData.append("fichier", importFichierActuel);
@@ -6181,6 +7084,7 @@ async function executerPrevisualisation() {
   if (importReglageDelimiteur) formData.append("delimiteur", importReglageDelimiteur);
   if (importReglageSeparateurDecimal)
     formData.append("separateur_decimal", importReglageSeparateurDecimal);
+  ajouterColonnesLues(formData);
   try {
     importApercu = await apiFetchForm(importUrl("/previsualiser"), formData);
     Object.keys(importMappingCategories).forEach((k) => delete importMappingCategories[k]);
@@ -6234,6 +7138,10 @@ async function relireFichierImport() {
     return;
   }
   await executerPrevisualisation();
+  // L'aperçu vient d'être calculé avec la configuration du moment : il n'y a
+  // plus d'écart entre ce que le tableau montre et ce que l'app a lu.
+  importApercuAReloire = false;
+  majBoutonRelireApercu();
 }
 
 // Libellés et couleurs des propriétés importables, pour la visualisation du
@@ -6252,6 +7160,49 @@ function classeColonneApercu(propriete) {
   return `col-${propriete}`;
 }
 
+/**
+ * LA PROPRIÉTÉ LUE DANS CHAQUE COLONNE, prise sur la configuration VIVANTE et
+ * non sur celle qu'avait le serveur au dernier aperçu.
+ *
+ * C'est ce qui permet de déplacer un en-tête et de voir aussitôt les couleurs
+ * suivre, sans relire le fichier : le tableau montre alors ce que l'app LIRA,
+ * pendant que les lignes résolues plus bas montrent encore ce qu'elle A LU. Le
+ * bouton de relecture est là pour refermer cet écart quand la réorganisation
+ * est finie.
+ */
+function proprietesParColonneVivantes() {
+  const carte = {};
+  importConfigColonnes.forEach((c) => {
+    if (c.index >= 1) carte[String(c.index)] = c.propriete;
+  });
+  return carte;
+}
+
+/**
+ * Échange les deux colonnes désignées par leurs NUMÉROS.
+ *
+ * « Échange » et non « déplace » : si les deux portent une propriété, elles
+ * troquent leurs numéros ; si l'une est ignorée, l'autre vient s'y poser et
+ * laisse sa place vide. Dans les deux cas, aucune propriété n'est perdue et
+ * aucun numéro ne se retrouve lu deux fois — ce qu'un simple déplacement aurait
+ * fait dès qu'on vise une colonne déjà lue.
+ */
+function echangerColonnesImport(depuis, vers) {
+  if (depuis === vers) return false;
+  const a = importConfigColonnes.find((c) => c.index === depuis);
+  const b = importConfigColonnes.find((c) => c.index === vers);
+  if (!a && !b) return false;
+  if (a) a.index = vers;
+  if (b) b.index = depuis;
+  return true;
+}
+
+// Les en-têtes ont été réorganisés depuis la dernière lecture du fichier : le
+// tableau montre la configuration du moment, les lignes résolues plus bas
+// montrent encore l'ancienne. Le bouton de relecture le signale tant que c'est
+// vrai.
+let importApercuAReloire = false;
+
 function renderApercuFichier() {
   const bloc = document.getElementById("import-apercu-fichier-bloc");
   const apercu = importApercu && importApercu.apercu_fichier;
@@ -6261,21 +7212,49 @@ function renderApercuFichier() {
   }
   bloc.style.display = "";
 
-  const largeur = apercu.lignes.reduce((max, l) => Math.max(max, l.length), 0);
+  const largeurFichier = apercu.lignes.reduce((max, l) => Math.max(max, l.length), 0);
+  const proprietes = proprietesParColonneVivantes();
+  // AU-DELÀ DE LA LARGEUR DU FICHIER, autant de colonnes VIDES qu'il en faut
+  // pour que chaque propriété configurée ait son en-tête.
+  //
+  // Sans elles, une propriété dont le numéro dépasse les colonnes du fichier
+  // — le cas d'un preset neuf, dont « Montant » est en colonne 7 devant un
+  // relevé qui n'en a que quatre — n'apparaissait nulle part dans le tableau :
+  // impossible de l'attraper pour la déplacer, alors que c'est justement celle
+  // qu'on cherche à remettre en face. Elles ne contiennent rien, ne se
+  // colorent pas, et disparaissent d'elles-mêmes dès que la propriété
+  // redescend dans le fichier.
+  const largeurConfiguree = importConfigColonnes.reduce(
+    (max, c) => Math.max(max, c.index || 0),
+    0
+  );
+  const largeur = Math.max(largeurFichier, largeurConfiguree);
 
   const classeColonne = (i) => {
-    const propriete = apercu.proprietes_par_colonne[String(i)];
+    const propriete = proprietes[String(i)];
     return propriete ? classeColonneApercu(propriete) : "col-ignoree";
   };
 
   const entetes = [];
   for (let i = 1; i <= largeur; i++) {
-    const propriete = apercu.proprietes_par_colonne[String(i)];
+    const propriete = proprietes[String(i)];
     const libelle = propriete
       ? APERCU_PROPRIETES[propriete] || propriete
       : "non importée";
+    // DÉPLAÇABLE, l'en-tête et lui seul : les cellules ne bougent pas — ce
+    // qu'on réorganise est la façon de LIRE le fichier, pas le fichier.
+    //
+    // Une colonne HORS FICHIER porte une classe de plus : elle est bien là pour
+    // qu'on puisse attraper sa propriété, mais elle ne décrit aucune donnée et
+    // ne doit pas se lire comme une colonne qu'on aurait oublié de mapper.
+    const horsFichier = i > largeurFichier ? " apercu-col-hors-fichier" : "";
+    const titre = horsFichier
+      ? t("Cette colonne n'existe pas dans le fichier : déplace son en-tête sur une colonne réelle.")
+      : t("Glisse cet en-tête sur un autre pour échanger les deux colonnes");
     entetes.push(
-      `<th class="${classeColonne(i)}"><span class="apercu-col-num">n°${i}</span>${escapeHtml(libelle)}</th>`
+      `<th class="${classeColonne(i)}${horsFichier} apercu-entete-deplacable" draggable="true"
+           data-colonne="${i}" title="${titre}"
+        ><span class="apercu-col-num">n°${i}</span>${escapeHtml(libelle)}</th>`
     );
   }
 
@@ -6286,20 +7265,120 @@ function renderApercuFichier() {
       const estEnteteIgnoree = apercu.premiere_ligne_ignoree && index === 0;
       const cellules = [];
       for (let i = 1; i <= largeur; i++) {
-        cellules.push(`<td class="${classeColonne(i)}">${escapeHtml(ligne[i - 1] || "")}</td>`);
+        // Une colonne hors fichier n'a rien à montrer : cellule vide, et grise
+        // quelle que soit la propriété qui la vise — il n'y a rien à lire là.
+        const horsFichier = i > largeurFichier ? " apercu-col-hors-fichier" : "";
+        cellules.push(
+          `<td class="${classeColonne(i)}${horsFichier}">${escapeHtml(ligne[i - 1] || "")}</td>`
+        );
       }
       return `<tr class="${estEnteteIgnoree ? "apercu-ligne-ignoree" : ""}">${cellules.join("")}</tr>`;
     })
     .join("");
 
-  document.getElementById("import-apercu-fichier-table").innerHTML =
-    `<thead><tr>${entetes.join("")}</tr></thead><tbody>${corps}</tbody>`;
+  const table = document.getElementById("import-apercu-fichier-table");
+  table.innerHTML = `<thead><tr>${entetes.join("")}</tr></thead><tbody>${corps}</tbody>`;
+  cablerDeplacementEntetesApercu(table);
+  majBoutonRelireApercu();
 
   // Le fichier entier est là : le tableau se borne en hauteur (cf.
   // .apercu-fichier-defilement) et se parcourt en défilant, dans les deux sens.
   document.getElementById("import-apercu-fichier-info").textContent =
     `${apercu.total_lignes} ligne(s) au total — fais défiler le tableau pour les voir toutes.`;
 }
+
+/**
+ * Glisser un en-tête sur un autre échange les deux colonnes.
+ *
+ * POURQUOI CE GESTE EN PLUS DES NUMÉROS. Les numéros de « Configuration du
+ * fichier » disent où lire chaque propriété, et restent la façon exacte de le
+ * dire ; mais corriger un relevé dont trois colonnes sont décalées demandait
+ * d'aller chercher trois champs dans un panneau replié, en tenant de tête les
+ * numéros à ne pas dupliquer. Ici on attrape « Date » et on le pose sur la
+ * colonne où les dates se trouvent. Les deux chemins écrivent la même chose,
+ * `importConfigColonnes`.
+ *
+ * RIEN N'EST RELU AUTOMATIQUEMENT. Réorganiser trois colonnes, c'est passer par
+ * deux états intermédiaires que le fichier ne sait pas lire : relire à chaque
+ * dépôt aurait rempli l'écran d'erreurs qu'on s'apprête à corriger. La
+ * relecture est donc un geste à part, le bouton juste à côté du titre.
+ *
+ * HTML5 natif, comme les autres glisser-déposer de l'app (règles, comptes) : la
+ * liste est courte, horizontale, et n'a besoin ni de défilement automatique ni
+ * de multi-sélection.
+ */
+function cablerDeplacementEntetesApercu(table) {
+  let depuis = null;
+
+  table.querySelectorAll("th[data-colonne]").forEach((entete) => {
+    entete.addEventListener("dragstart", (e) => {
+      depuis = Number(entete.dataset.colonne);
+      entete.classList.add("apercu-entete-glissee");
+      e.dataTransfer.effectAllowed = "move";
+      // Firefox n'amorce pas le glisser sans données attachées.
+      e.dataTransfer.setData("text/plain", String(depuis));
+    });
+
+    entete.addEventListener("dragend", () => {
+      depuis = null;
+      table
+        .querySelectorAll(".apercu-entete-glissee, .apercu-entete-cible")
+        .forEach((el) => el.classList.remove("apercu-entete-glissee", "apercu-entete-cible"));
+    });
+
+    entete.addEventListener("dragover", (e) => {
+      if (depuis === null || Number(entete.dataset.colonne) === depuis) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      entete.classList.add("apercu-entete-cible");
+    });
+
+    entete.addEventListener("dragleave", () => {
+      entete.classList.remove("apercu-entete-cible");
+    });
+
+    entete.addEventListener("drop", (e) => {
+      e.preventDefault();
+      const source = depuis !== null ? depuis : Number(e.dataTransfer.getData("text/plain"));
+      const cible = Number(entete.dataset.colonne);
+      if (!echangerColonnesImport(source, cible)) return;
+      importApercuAReloire = true;
+      // Les deux endroits que l'échange concerne : les numéros du panneau de
+      // configuration, et le tableau lui-même (couleurs et en-têtes).
+      renderImportConfig();
+      renderApercuFichier();
+    });
+  });
+}
+
+/** Le bouton de relecture dit s'il y a quelque chose à relire. */
+function majBoutonRelireApercu() {
+  const bouton = document.getElementById("btn-import-apercu-relire");
+  if (!bouton) return;
+  bouton.classList.toggle("a-relire", importApercuAReloire);
+  bouton.title = importApercuAReloire
+    ? t("Les colonnes ont changé : relire le fichier pour voir ce que l'import donnera.")
+    : t("Relire le fichier avec la configuration actuelle");
+  bouton.setAttribute("aria-label", bouton.title);
+  document.getElementById("import-apercu-fichier-alerte").style.display =
+    importApercuAReloire ? "" : "none";
+}
+
+document.getElementById("btn-import-apercu-relire").innerHTML = ICONE_RELIRE;
+document.getElementById("btn-import-apercu-relire").addEventListener("click", async () => {
+  if (!importFichierActuel) {
+    showMessage(t("Aucun fichier chargé à relire."), "error");
+    return;
+  }
+  await relireFichierImport();
+  // LE RAPPEL QUI MANQUAIT : relire montre ce que l'import DONNERA, mais
+  // n'écrit rien. Un ordre de colonnes obtenu en glissant trois en-têtes serait
+  // perdu au prochain fichier si personne ne dit qu'il reste à enregistrer.
+  showMessage(
+    t("Fichier relu. « Enregistrer la configuration » pour garder cet ordre de colonnes dans le preset."),
+    "success"
+  );
+});
 
 // Ce que la configuration laisse d'ambigu sans être faux (montant envoyé ou frais
 // lus sans leur devise) : signalé une fois, au-dessus de l'aperçu. Jamais
@@ -6821,6 +7900,15 @@ function statutLigneApercuHtml(ligne) {
   ) {
     return '<span class="badge-partiel">catégorie à confirmer</span>';
   }
+  // UNE DÉCOUPE QUI N'A PAS ABOUTI ne bloque pas la ligne : elle s'importera
+  // avec sa catégorie ordinaire (cf. regles_categorisation.resoudre_decoupes).
+  // Le dire quand même — sinon une règle de découpe silencieusement inopérante
+  // ne se remarquerait que des mois plus tard, dans l'histogramme.
+  if (ligne.decoupe_erreur) {
+    return `<span class="badge-partiel">${escapeHtml(
+      traduireMessageServeur(ligne.decoupe_erreur)
+    )}</span>`;
+  }
   // Classement automatique : on nomme la règle responsable, pour que le
   // résultat reste traçable et corrigeable.
   if (ligne.regle_appliquee) {
@@ -7295,6 +8383,31 @@ function compteDeduitHtml(nom) {
   )}">${escapeHtml(nom)} ?</span>`;
 }
 
+/**
+ * La cellule « Catégorie » d'une ligne d'aperçu : une catégorie, ou la DÉCOUPE
+ * qu'une règle lui a posée.
+ *
+ * LES PARTS SONT DÉJÀ EN MONTANTS ici, pas en formules (cf.
+ * schemas.ImportLigne.decoupes) : l'aperçu sert précisément à voir ce qui sera
+ * écrit, et afficher « min(montant; 50) » sur une ligne à 32 € aurait laissé
+ * faire le calcul de tête.
+ *
+ * Le détail passe par l'infobulle native du navigateur plutôt que par une
+ * ligne dépliable : le tableau de l'aperçu porte déjà dix colonnes et une
+ * édition en place, y ajouter un second niveau de lignes l'aurait rendu
+ * illisible. La liste des opérations, elle, a la place de le déplier.
+ */
+function categorieLigneApercuHtml(ligne) {
+  const parts = ligne.decoupes || [];
+  if (parts.length === 0) return nomCategorie(ligne.categorie_id);
+  const detail = parts
+    .map((part) => `${nomCategorie(part.categorie_id)} : ${part.montant.toFixed(2)}`)
+    .join("\n");
+  return `<span class="badge-regle" title="${escapeHtml(detail)}">${t("Découpée")} · ${
+    parts.length
+  } ${t("parts")}</span>`;
+}
+
 function creerLigneApercuAffichage(ligne, infoType, { lectureSeule = false } = {}) {
   const tr = document.createElement("tr");
   // Une ligne en lecture seule (ligne déjà en base, affichée pour
@@ -7327,7 +8440,7 @@ function creerLigneApercuAffichage(ligne, infoType, { lectureSeule = false } = {
     // sous-sections ont déjà une catégorie implicite (fixe), pas besoin de
     // la répéter en colonne (cf. regroupement par catégorie d'opération).
     colonnesSpecifiques = infoType.categorieLibre
-      ? `<td>${nomCategorie(ligne.categorie_id)}</td><td>${compteHtml}</td>`
+      ? `<td>${categorieLigneApercuHtml(ligne)}</td><td>${compteHtml}</td>`
       : `<td>${compteHtml}</td>`;
   }
 
@@ -8702,6 +9815,7 @@ document.getElementById("btn-import-confirmer").addEventListener("click", async 
   if (importReglageDelimiteur) formData.append("delimiteur", importReglageDelimiteur);
   if (importReglageSeparateurDecimal)
     formData.append("separateur_decimal", importReglageSeparateurDecimal);
+  ajouterColonnesLues(formData);
   const categories = {};
   Object.entries(importMappingCategories).forEach(([nom, categorieId]) => {
     if (categorieId) categories[nom] = categorieId;
@@ -9225,6 +10339,33 @@ async function loadImportHistorique() {
   renderImportHistorique(historique);
 }
 
+/**
+ * « releve-mars.xlsx <em>— Compte courant</em> » : le fichier importé, suivi du
+ * compte d'où il sort.
+ *
+ * POURQUOI CE N'EST PAS DANS LE FICHIER. Deux banques exportent des noms de
+ * fichier voisins (« export.csv », « operations.xlsx »), et rien dans la ligne
+ * d'historique ne disait sur quel compte l'import avait atterri. Avant
+ * d'annuler, c'est pourtant la première chose qu'on veut vérifier.
+ *
+ * LE COMPTE VIENT DU PRESET, pas de l'historique : l'historique est déjà filtré
+ * par preset (cf. importUrl), et c'est le preset qui porte le compte dont il lit
+ * les relevés (`import_preset.compte_id`). Rien n'est donc à ajouter côté
+ * serveur.
+ *
+ * RIEN N'EST AFFICHÉ quand le preset n'est lié à aucun compte : le fichier
+ * nomme alors lui-même le compte de chaque ligne, et il n'y a pas UN compte à
+ * nommer — l'écrire aurait été faux plutôt qu'absent.
+ *
+ * En italique, comme partout où l'app annote un libellé de sa provenance (cf.
+ * libelleCategorieBanqueHtml).
+ */
+function compteImportHtml() {
+  const compteId = compteDuPresetImport();
+  if (compteId == null) return "";
+  return ` <em class="import-historique-compte">— ${escapeHtml(nomCompte(compteId))}</em>`;
+}
+
 function renderImportHistorique(historique) {
   const body = document.getElementById("import-historique-liste");
   body.innerHTML = "";
@@ -9252,7 +10393,7 @@ function renderImportHistorique(historique) {
         )}</span>`;
     tr.innerHTML = `
       <td>${formatDateHeure(h.date_import)}</td>
-      <td>${escapeHtml(h.nom_fichier || "-")}</td>
+      <td>${escapeHtml(h.nom_fichier || "-")}${compteImportHtml()}</td>
       <td>${h.operations_creees}</td>
       <td>${h.lignes_ignorees}</td>
       <td>${h.doublons_detectes || 0}</td>
@@ -9761,6 +10902,308 @@ document.addEventListener("keydown", (evenement) => {
   bouton.click();
 });
 
+/* ---------- Base de données : emplacement, bascule, premier démarrage ----------
+ *
+ * Venu de l'extension de développement `base-de-donnees`, qui n'existe plus.
+ * Le raisonnement qui en faisait un outil réservé au développement — ouvrir une
+ * base arbitraire est un moyen commode de travailler sans s'en rendre compte
+ * sur la mauvaise — tenait tant que la base PAR DÉFAUT était sûre. Elle ne l'est
+ * pas : elle vit dans le dossier de l'application, que la prochaine mise à jour
+ * remplace. Sur macOS elle est même DANS le bundle `.app`, que le Finder
+ * remplace en entier sans jamais proposer de fusionner.
+ *
+ * Cf. backend/app/routers/parametres_base.py pour le versant serveur.
+ */
+
+// La bascule recharge la page : le compte rendu de migration renvoyé par le
+// serveur serait perdu à l'instant même où il compte. On le met de côté le
+// temps du rechargement, et on l'affiche une fois — jamais deux.
+function afficherMigrationBaseSiRecente() {
+  const brut = sessionStorage.getItem("migrationBase");
+  if (!brut) return;
+  sessionStorage.removeItem("migrationBase");
+  let info;
+  try {
+    info = JSON.parse(brut);
+  } catch {
+    return;
+  }
+  // Persistant : le chemin de la copie est trop long à lire en quatre secondes,
+  // et c'est la seule fois où il est donné.
+  showMessage(
+    `Base mise à jour du schéma ${info.revision_quittee} vers ${info.revision_app}. ` +
+      `Copie de l'état précédent conservée ici : ${info.sauvegarde}`,
+    "success",
+    { persistent: true }
+  );
+}
+
+// Changer de base rend caduque tout ce que l'app a déjà chargé (comptes,
+// catégories, opérations d'une autre base ne correspondent à rien ici) : un
+// rechargement complet est le seul moyen sûr d'éviter un état mélangé.
+function rechargerApresBascule(etat) {
+  if (etat && etat.migration_appliquee) {
+    sessionStorage.setItem(
+      "migrationBase",
+      JSON.stringify({
+        revision_quittee: etat.revision_quittee,
+        revision_app: etat.revision_app,
+        sauvegarde: etat.sauvegarde,
+      })
+    );
+  }
+  window.location.reload();
+}
+
+/**
+ * Le sélecteur de fichiers DU SYSTÈME, quand on tourne dans l'application de
+ * bureau. Rend null si elle n'est pas là (page ouverte dans un navigateur
+ * pendant le développement) ou si l'utilisateur a annulé.
+ *
+ * POURQUOI IL FAUT PASSER PAR LE NATIF. Un navigateur ne donne JAMAIS le chemin
+ * complet d'un fichier choisi — `<input type="file">` ne rend qu'un nom, et
+ * c'est une limite de sécurité, pas un oubli. Or c'est exactement un chemin
+ * complet que l'application demande. Côté bureau, pywebview expose de quoi
+ * ouvrir le vrai sélecteur (cf. ApiBureau dans desktop/app_desktop.py).
+ */
+function selecteurNatifDisponible() {
+  return Boolean(window.pywebview && window.pywebview.api);
+}
+
+async function choisirCheminNatif(methode, cheminPropose) {
+  if (!selecteurNatifDisponible()) return null;
+  try {
+    const chemin = await window.pywebview.api[methode](cheminPropose || "");
+    return chemin || null;
+  } catch {
+    // Un sélecteur qui ne s'ouvre pas ne doit pas casser l'écran : la saisie à
+    // la main reste possible, et c'était le seul chemin avant.
+    return null;
+  }
+}
+
+async function loadParametresBdd() {
+  try {
+    const etat = await apiFetch("/parametres/base");
+    document.getElementById("bdd-chemin-actuel").textContent = etat.chemin_actuel;
+    document.getElementById("bdd-chemin").value = etat.chemin_actuel;
+
+    // L'AVERTISSEMENT EST LE CŒUR DE L'ÉCRAN, pas une décoration : c'est la
+    // seule chose qui distingue une installation dont les données survivront
+    // d'une installation dont elles disparaîtront à la prochaine archive.
+    const alerte = document.getElementById("bdd-alerte-risque");
+    const messages = [];
+    if (etat.a_risque) {
+      messages.push(
+        `Cette base est dans le dossier de l'application (${etat.dossier_application}). ` +
+          `Une mise à jour la remplacera : déplace-la ailleurs, par exemple ${etat.chemin_propose}.`
+      );
+    }
+    if (etat.base_memorisee_introuvable) {
+      messages.push(
+        `La base retenue au dernier lancement est introuvable : ${etat.base_memorisee_introuvable}. ` +
+          `L'application est repartie sur son emplacement par défaut — rien n'a été effacé, ` +
+          `le fichier est simplement ailleurs (disque débranché, dossier renommé).`
+      );
+    }
+    if (!etat.choix_memorise) {
+      messages.push(
+        "Ce choix n'a pas pu être enregistré : il ne vaudra que pour cette session."
+      );
+    }
+    alerte.innerHTML = messages.map((m) => `<div>${escapeHtml(m)}</div>`).join("");
+    alerte.style.display = messages.length ? "" : "none";
+
+    // La version de schéma du fichier ouvert, face à celle qu'attend l'app :
+    // un écart est exactement ce qui rend une base illisible après une mise à
+    // jour, et c'est la première chose à vérifier quand quelque chose cloche.
+    const schemaEl = document.getElementById("bdd-schema");
+    const aJour = etat.revision_base === etat.revision_app;
+    schemaEl.textContent = aJour
+      ? `Schéma ${etat.revision_base || "?"} — à jour.`
+      : `Schéma ${etat.revision_base || "inconnu"}, l'application attend ${etat.revision_app}.`;
+    schemaEl.classList.toggle("hint", aJour);
+    schemaEl.classList.toggle("import-avertissements", !aJour);
+  } catch (err) {
+    showMessage(err.message, "error");
+  }
+}
+
+document.getElementById("btn-bdd-parcourir").addEventListener("click", async () => {
+  // Le vrai sélecteur du système dans l'application de bureau ; à défaut, le
+  // champ de fichier du navigateur, qui ne pré-remplit que le NOM (cf. la note
+  // sous le champ, qui dit exactement cette limite).
+  const chemin = await choisirCheminNatif(
+    "choisir_base_existante",
+    document.getElementById("bdd-chemin").value.trim()
+  );
+  if (chemin) {
+    document.getElementById("bdd-chemin").value = chemin;
+    return;
+  }
+  if (selecteurNatifDisponible()) return; // annulé : ne rien changer
+  document.getElementById("bdd-fichier").click();
+});
+
+document.getElementById("bdd-fichier").addEventListener("change", (e) => {
+  const fichier = e.target.files[0];
+  if (!fichier) return;
+  // Le navigateur ne donne jamais le chemin complet (sécurité) : seul le nom
+  // sert d'indice, à compléter du dossier à la main.
+  document.getElementById("bdd-chemin").value = fichier.name;
+  document.getElementById("bdd-chemin").focus();
+});
+
+document.getElementById("form-bdd").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const chemin = document.getElementById("bdd-chemin").value.trim();
+  if (!chemin) {
+    showMessage(t("Renseigne le chemin complet du fichier .db."), "error");
+    return;
+  }
+  if (!confirm(`Basculer toutes les opérations de l'app vers :\n${chemin}\n\nContinuer ?`)) return;
+  try {
+    rechargerApresBascule(
+      await apiFetch("/parametres/base", { method: "PUT", body: JSON.stringify({ chemin }) })
+    );
+  } catch (err) {
+    showMessage(err.message, "error");
+  }
+});
+
+// « Créer / déplacer ici » : le même geste que l'écran de premier démarrage,
+// accessible après coup. DÉPLACE la base ouverte tant qu'elle est encore dans
+// le dossier de l'application — c'est le cas qu'on cherche à corriger, et
+// laisser derrière une copie que la mise à jour effacera n'aurait aucun sens.
+document.getElementById("btn-bdd-installer").addEventListener("click", async () => {
+  const chemin = document.getElementById("bdd-chemin").value.trim();
+  if (!chemin) {
+    showMessage(t("Renseigne le chemin complet du fichier .db."), "error");
+    return;
+  }
+  let etatActuel;
+  try {
+    etatActuel = await apiFetch("/parametres/base");
+  } catch (err) {
+    showMessage(err.message, "error");
+    return;
+  }
+  if (!confirm(`Mettre la base à cet emplacement :\n${chemin}\n\nContinuer ?`)) return;
+  try {
+    const etat = await apiFetch("/parametres/base/installer", {
+      method: "POST",
+      body: JSON.stringify({ chemin, deplacer_actuelle: etatActuel.a_risque }),
+    });
+    sessionStorage.setItem("baseInstallee", etat.action || "");
+    rechargerApresBascule(etat);
+  } catch (err) {
+    showMessage(err.message, "error");
+  }
+});
+
+function afficherInstallationBaseSiRecente() {
+  const action = sessionStorage.getItem("baseInstallee");
+  if (action === null) return;
+  sessionStorage.removeItem("baseInstallee");
+  const phrases = {
+    déplacée: "Tes données ont été déplacées : elles ne sont plus dans le dossier de l'application, une mise à jour ne les touchera plus.",
+    créée: "Nouvelle base créée à l'emplacement choisi.",
+    ouverte: "Base existante ouverte à l'emplacement choisi.",
+  };
+  showMessage(phrases[action] || "Emplacement de la base mis à jour.", "success", {
+    persistent: true,
+  });
+}
+
+/**
+ * L'écran BLOQUANT du premier démarrage.
+ *
+ * NE BLOQUE PAS LE CHARGEMENT DE L'APPLICATION derrière lui : la modale se pose
+ * par-dessus une application déjà chargée. Si quoi que ce soit échouait dans
+ * cette vérification, l'utilisateur se retrouverait sinon devant une page
+ * blanche sans recours — or ce qu'on protège ici est justement ce qu'il ne faut
+ * pas rendre inaccessible.
+ */
+async function verifierEmplacementBase() {
+  let etat;
+  try {
+    etat = await apiFetch("/parametres/base");
+  } catch {
+    // Le serveur n'a pas répondu : l'init a déjà signalé le problème, et une
+    // seconde erreur sur le même sujet n'apprendrait rien.
+    return;
+  }
+  if (etat.base_memorisee_introuvable) {
+    showMessage(
+      `Base introuvable à l'emplacement retenu (${etat.base_memorisee_introuvable}). ` +
+        `L'application s'est ouverte sur sa base par défaut : va dans Paramètres → Base de données.`,
+      "error",
+      { persistent: true }
+    );
+  }
+  if (!etat.configuration_requise) return;
+
+  const champ = document.getElementById("modale-bdd-chemin");
+  champ.value = etat.chemin_propose;
+  document.getElementById("modale-bdd-explication").textContent =
+    `Actuellement : ${etat.chemin_actuel}. Ce fichier sera DÉPLACÉ vers l'emplacement ci-dessus ` +
+    `(rien n'est perdu, rien n'est copié en double).`;
+  // Le bouton n'apparaît que si le sélecteur du système répond présent : dans
+  // un navigateur, il n'ouvrirait rien.
+  document.getElementById("btn-modale-bdd-parcourir").style.display = selecteurNatifDisponible()
+    ? ""
+    : "none";
+  document.getElementById("modale-bdd").style.display = "";
+  champ.focus();
+}
+
+// L'API de bureau est INJECTÉE APRÈS le chargement de la page : pywebview
+// signale sa disponibilité par cet événement, qui peut très bien arriver
+// pendant que la modale est déjà ouverte. Sans ce rattrapage, l'écran de
+// premier démarrage se figerait sur le seul cas « pas de sélecteur » selon
+// l'ordre du démarrage — un bouton présent une fois sur deux.
+window.addEventListener("pywebviewready", () => {
+  const modale = document.getElementById("modale-bdd");
+  if (modale.style.display !== "none") {
+    document.getElementById("btn-modale-bdd-parcourir").style.display = "";
+  }
+});
+
+document.getElementById("btn-modale-bdd-parcourir").addEventListener("click", async () => {
+  const champ = document.getElementById("modale-bdd-chemin");
+  // « Enregistrer sous » et non « ouvrir » : on désigne ici l'endroit où la
+  // base VA être rangée, un fichier qui n'existe pas encore. Un sélecteur
+  // d'ouverture ne saurait montrer que ce qui est déjà là.
+  const chemin = await choisirCheminNatif("choisir_emplacement_base", champ.value.trim());
+  if (chemin) champ.value = chemin;
+});
+
+document.getElementById("btn-modale-bdd-valider").addEventListener("click", async () => {
+  const bouton = document.getElementById("btn-modale-bdd-valider");
+  const erreur = document.getElementById("modale-bdd-erreur");
+  const chemin = document.getElementById("modale-bdd-chemin").value.trim();
+  if (!chemin) return;
+  bouton.disabled = true;
+  erreur.style.display = "none";
+  try {
+    const etat = await apiFetch("/parametres/base/installer", {
+      method: "POST",
+      // `true` sans condition : cette modale ne s'ouvre QUE sur une base à
+      // risque (cf. configuration_requise), et cette base-là a déjà été créée
+      // et remplie de ses valeurs initiales au démarrage. En créer une seconde,
+      // vide, en abandonnant la première dans le dossier que la mise à jour
+      // efface, serait le plus mauvais des deux mondes.
+      body: JSON.stringify({ chemin, deplacer_actuelle: true }),
+    });
+    sessionStorage.setItem("baseInstallee", etat.action || "");
+    rechargerApresBascule(etat);
+  } catch (err) {
+    erreur.textContent = err.message;
+    erreur.style.display = "";
+    bouton.disabled = false;
+  }
+});
+
 /* ---------- Init ---------- */
 
 document.querySelectorAll("nav button").forEach((btn) => {
@@ -9780,6 +11223,19 @@ document.querySelectorAll("nav button").forEach((btn) => {
     // posé son bouton de navigation avant que l'utilisateur ne regarde la
     // barre. Ne lève jamais — une extension en panne n'empêche pas le budget
     // de s'ouvrir (cf. frontend/extensions.js).
+    // AVANT les extensions, qui ont leur propre fenêtre de lancement : deux
+    // modales empilées cacheraient celle des deux qui bloque. L'annonce des
+    // extensions se tait d'elle-même tant que celle-ci est ouverte (cf.
+    // extensions.js::afficherModaleExtensions), et reparaît au rechargement
+    // qui suit le choix.
+    //
+    // Ne bloque PAS le reste de l'init : la modale se pose par-dessus une
+    // application qui finit de se charger derrière. Si quoi que ce soit
+    // échouait ici, l'utilisateur se retrouverait sinon devant une page blanche
+    // sans recours — or c'est justement l'accès à ses données qu'on protège.
+    afficherMigrationBaseSiRecente();
+    afficherInstallationBaseSiRecente();
+    await verifierEmplacementBase();
     await chargerExtensions();
     await loadDashboard();
   } catch (err) {

@@ -485,6 +485,13 @@
               <input type="text" id="impl-regle-nom" placeholder="ex. Achats au comptant" />
             </div>
 
+            <!-- La note, comme sur les règles bancaires (migration 0050) :
+                 pourquoi cette règle existe. Jamais lue par l'application. -->
+            <div class="regle-champ-ligne">
+              <label for="impl-regle-description">Description<i class="info-bulle" tabindex="0" data-info="Note libre : pourquoi cette règle existe, quel relevé l'a rendue nécessaire. Jamais lue par l'application.">i</i></label>
+              <textarea id="impl-regle-description" rows="2" placeholder="ex. ce courtier écrit « ACHAT COMPTANT » suivi du nom du titre"></textarea>
+            </div>
+
             <h4>Conditions</h4>
             <p class="hint">
               Les groupes se combinent entre eux ; à l'intérieur d'un groupe, les conditions se

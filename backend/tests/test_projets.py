@@ -320,3 +320,195 @@ def test_les_projets_se_reordonnent(db_session):
     second = _projet(db_session, "B")
     crud.reordonner_sous_filtres(db_session, [second.id, premier.id])
     assert [p["nom"] for p in routeur.list_projets(db=db_session)] == ["B", "A"]
+
+
+# ---------- L'histogramme d'un projet ----------
+#
+# Le total dit ce qu'un voyage a coûté ; l'histogramme dit EN QUOI. Ce qui est
+# vérifié ici est qu'il raconte la même chose que le total posé juste au-dessus
+# de lui : mêmes opérations, même règle de sens, même découpage par monnaie.
+
+
+def _barres(db, projet, monnaie_id=None):
+    """Les barres d'un projet, pour une monnaie (la principale par défaut)."""
+    lu = service.lire_sous_filtre(crud.get_sous_filtre(db, projet.id))
+    monnaie_id = monnaie_id or get_monnaie_id(db)
+    total = next((t for t in lu["totaux"] if t["monnaie_id"] == monnaie_id), None)
+    return total["depenses_par_categorie"] if total else []
+
+
+def test_la_somme_des_barres_vaut_le_total_depense(db_session):
+    """L'INVARIANT DE L'ÉCRAN : le graphe est posé sous le total, les deux
+    doivent s'accorder."""
+    compte = creer_compte(db_session, "Courant")
+    projet = _projet(db_session)
+    crud.ajouter_operations_au_sous_filtre(
+        db_session,
+        projet,
+        [
+            _operation(db_session, compte, montant=120.0).id,
+            _operation(
+                db_session,
+                compte,
+                montant=80.0,
+                categorie_id=get_categorie_id(db_session, "Alimentaire"),
+            ).id,
+        ],
+    )
+
+    lu = service.lire_sous_filtre(crud.get_sous_filtre(db_session, projet.id))
+    total = lu["totaux"][0]
+
+    assert sum(b["total_reel"] for b in total["depenses_par_categorie"]) == pytest.approx(
+        total["depenses"]
+    )
+    assert total["depenses"] == 200.0
+
+
+def test_les_barres_sont_classees_du_plus_lourd_au_plus_leger(db_session):
+    compte = creer_compte(db_session, "Courant")
+    projet = _projet(db_session)
+    crud.ajouter_operations_au_sous_filtre(
+        db_session,
+        projet,
+        [
+            _operation(db_session, compte, montant=30.0).id,
+            _operation(
+                db_session,
+                compte,
+                montant=150.0,
+                categorie_id=get_categorie_id(db_session, "Alimentaire"),
+            ).id,
+        ],
+    )
+
+    barres = _barres(db_session, projet)
+
+    assert [b["categorie"] for b in barres] == ["Alimentaire", "Autres"]
+    assert [b["total_reel"] for b in barres] == [150.0, 30.0]
+
+
+def test_une_entree_versee_dans_le_projet_ne_dessine_aucune_barre(db_session):
+    """Les entrées se lisent dans leur propre total : un graphe de DÉPENSES qui
+    en porterait une contredirait la somme des barres."""
+    compte = creer_compte(db_session, "Courant")
+    projet = _projet(db_session)
+    crud.ajouter_operations_au_sous_filtre(
+        db_session,
+        projet,
+        [
+            _operation(db_session, compte, montant=100.0).id,
+            _operation(
+                db_session,
+                compte,
+                montant=60.0,
+                sens=Sens.entree,
+                categorie_id=get_categorie_id(db_session, "Alimentaire"),
+            ).id,
+        ],
+    )
+
+    barres = _barres(db_session, projet)
+
+    assert [b["categorie"] for b in barres] == ["Autres"]
+    assert barres[0]["total_reel"] == 100.0
+
+
+def test_un_virement_sortant_compte_comme_une_depense(db_session):
+    """Même règle que le total : le SENS décide, pas le type (cf.
+    service_projets.SENS_SORTANTS)."""
+    compte = creer_compte(db_session, "Courant")
+    projet = _projet(db_session)
+    crud.ajouter_operations_au_sous_filtre(
+        db_session,
+        projet,
+        [
+            _operation(
+                db_session,
+                compte,
+                montant=75.0,
+                sens=Sens.transfert_sortant,
+                type_id=get_type_id(db_session, "virement"),
+                categorie_id=None,
+            ).id
+        ],
+    )
+
+    barres = _barres(db_session, projet)
+
+    # Une opération sans catégorie garde sa barre : sans elle, la somme des
+    # barres cesserait de valoir le total.
+    assert [b["categorie"] for b in barres] == [service.CATEGORIE_SANS]
+    assert barres[0]["total_reel"] == 75.0
+
+
+def test_les_parts_d_une_operation_decoupee_font_leurs_propres_barres(db_session):
+    compte = creer_compte(db_session, "Courant")
+    operation = _operation(db_session, compte, montant=120.0, categorie_id=None)
+    for ordre, (nom, montant) in enumerate(
+        [("Alimentaire", 90.0), ("Charges fixes", 30.0)]
+    ):
+        db_session.add(
+            models.OperationDecoupe(
+                operation_id=operation.id,
+                categorie_id=get_categorie_id(db_session, nom),
+                montant=montant,
+                ordre=ordre,
+            )
+        )
+    db_session.commit()
+    projet = _projet(db_session)
+    crud.ajouter_operations_au_sous_filtre(db_session, projet, [operation.id])
+
+    barres = _barres(db_session, projet)
+
+    # Deux barres, et pas une troisième pour l'opération elle-même : la compter
+    # en plus de ses parts l'aurait doublée.
+    assert {b["categorie"]: b["total_reel"] for b in barres} == {
+        "Alimentaire": 90.0,
+        "Charges fixes": 30.0,
+    }
+
+
+def test_chaque_monnaie_a_ses_propres_barres(db_session):
+    """PAR MONNAIE ET JAMAIS AUTREMENT, comme le total : l'app n'additionne
+    jamais deux devises."""
+    dollar = creer_monnaie(db_session, "Dollar", "$")
+    compte = creer_compte(
+        db_session,
+        "Courant",
+        monnaies=[(get_monnaie_id(db_session), 0.0), (dollar.id, 0.0)],
+    )
+    projet = _projet(db_session)
+    crud.ajouter_operations_au_sous_filtre(
+        db_session,
+        projet,
+        [
+            _operation(db_session, compte, montant=100.0, monnaie_id=get_monnaie_id(db_session)).id,
+            _operation(db_session, compte, montant=40.0, monnaie_id=dollar.id).id,
+        ],
+    )
+
+    assert sum(b["total_reel"] for b in _barres(db_session, projet)) == 100.0
+    assert sum(b["total_reel"] for b in _barres(db_session, projet, dollar.id)) == 40.0
+
+
+def test_l_infobulle_fond_les_depenses_de_meme_libelle(db_session):
+    """Même règle que l'histogramme du dashboard : trois « Hôtel » à 90 € font
+    une ligne de 270, pas trois lignes de 90."""
+    compte = creer_compte(db_session, "Courant")
+    projet = _projet(db_session)
+    crud.ajouter_operations_au_sous_filtre(
+        db_session,
+        projet,
+        [_operation(db_session, compte, montant=90.0, nature="Hôtel").id for _ in range(3)],
+    )
+
+    top = _barres(db_session, projet)[0]["top_depenses"]
+
+    assert top == [{"nature": "Hôtel", "montant": 270.0, "nombre": 3}]
+
+
+def test_un_projet_vide_n_a_aucune_barre(db_session):
+    projet = _projet(db_session)
+    assert service.lire_sous_filtre(crud.get_sous_filtre(db_session, projet.id))["totaux"] == []

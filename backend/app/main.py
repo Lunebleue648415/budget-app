@@ -23,6 +23,7 @@ from .routers import (
     import_bancaire,
     monnaies,
     operations,
+    parametres_base,
     types_comptes,
     types_operation,
     virements,
@@ -40,6 +41,11 @@ app.include_router(virements.router)
 app.include_router(dashboard.router)
 app.include_router(import_bancaire.router)
 app.include_router(extensions.router)
+# Le panneau « Base de données » : DU NOYAU depuis que l'emplacement par défaut
+# est reconnu comme dangereux (il vit dans le dossier que la mise à jour
+# remplace). Choisir où ranger ses données n'est plus un outil de mise au point
+# mais la seule chose qui les protège — cf. routers/parametres_base.py.
+app.include_router(parametres_base.router)
 
 
 def _monter_extensions() -> list[str]:

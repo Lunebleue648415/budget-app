@@ -172,3 +172,19 @@
 .pw-bascule-suivi {
   color: var(--accent-light);
 }
+
+/* LE GLOBE, à gauche de cette flèche. Même bleu qu'elle, et ce n'est pas une
+   coïncidence : les deux disent la même chose (« ce titre est relu en ligne »),
+   la flèche par sa teinte, le globe par sa seule présence. Le jour où la flèche
+   est dépliée elle tourne et vire à l'accent : le globe, lui, ne bouge pas —
+   c'est lui qui porte l'information, elle n'en est que l'écho.
+
+   Il n'existe dans le DOM que pour un titre suivi (cf. greffeLiens) : rien à
+   masquer ici, et donc aucun état à tenir d'accord entre le JS et le CSS. */
+.pw-globe {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  margin-left: 0.4rem;
+  color: var(--accent-light);
+}

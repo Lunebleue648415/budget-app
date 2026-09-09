@@ -6,6 +6,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from .constants import (
     CHAMPS_REGLE_PLACEMENT_VALIDES,
     CHAMPS_REGLE_VALIDES,
+    NB_MAX_PARTS_DECOUPE,
+    OPERATEURS_NOMBRE,
+    operateurs_admis,
     TypeOperation,
     ConnecteurRegle,
     DomaineImport,
@@ -190,6 +193,26 @@ class OperationRembourseeInput(BaseModel):
     montant: float = Field(gt=0)
 
 
+class DecoupeInput(BaseModel):
+    """Une part d'une opération découpée, telle que l'écran l'envoie.
+
+    Le montant est STRICTEMENT positif : une part à zéro ne classerait rien et
+    occuperait une ligne du formulaire pour ne rien dire. Retirer la part est la
+    façon de dire « rien pour cette catégorie »."""
+
+    categorie_id: int
+    montant: float = Field(gt=0)
+
+
+class DecoupeRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    categorie_id: int
+    montant: float
+    ordre: int
+
+
 class OperationBase(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -200,6 +223,16 @@ class OperationBase(BaseModel):
     # classique, dépense remboursable) ; NULL pour les quatre autres, dont le
     # type porte à lui seul la classification.
     categorie_id: Optional[int] = None
+    # DÉCOUPE : la liste des parts, quand une seule catégorie ne suffit pas.
+    # Vide = opération ordinaire, classée par `categorie_id`. Non vide, elle
+    # REMPLACE la catégorie (que crud met alors à NULL) : les deux répondent à
+    # la même question, et en garder deux réponses aurait posé à chaque calcul
+    # celle de savoir laquelle compte.
+    #
+    # La somme des parts doit valoir le montant, et le type doit être
+    # `classique` : les deux se vérifient côté routeur, qui seul peut résoudre
+    # `type_id` en base — comme pour `montant_du` et sa borne.
+    decoupes: list[DecoupeInput] = Field(default_factory=list)
     nature: str
     montant: float = Field(ge=0)
     # Notes libres de l'utilisateur, sans aucune sémantique pour l'app :
@@ -210,6 +243,14 @@ class OperationBase(BaseModel):
     # demander : il envoie simplement la seule possible.
     monnaie_id: int
     statut: Statut
+    # LES FRAIS COMPRIS DANS `montant` (migration 0051). Purement descriptif :
+    # `montant` reste ce qui a bougé sur le compte, aucun solde ni agrégat ne
+    # lit ce champ. Il dit de QUOI le montant est fait, pour que l'écran puisse
+    # le redécomposer — et le laisser corriger.
+    frais: Optional[float] = Field(default=None, ge=0)
+    # La devise des frais, quand elle diffère de celle de l'opération. NULL =
+    # celle de l'opération, le cas ordinaire.
+    monnaie_frais_id: Optional[int] = None
     # None = non précisé : calculé côté serveur (montant si remboursable, sinon 0).
     # Montant fixe initialement dû ; ne change pas quand le remboursement a lieu.
     montant_du: Optional[float] = Field(default=None, ge=0)
@@ -305,6 +346,10 @@ class OperationUpdate(BaseModel):
     compte_id: Optional[int] = None
     type_id: Optional[int] = None
     categorie_id: Optional[int] = None
+    # None = ne touche pas aux parts existantes ; [] les efface toutes (et rend
+    # l'opération à sa catégorie unique). Même convention que
+    # `operations_remboursees` juste en dessous.
+    decoupes: Optional[list[DecoupeInput]] = None
     nature: Optional[str] = None
     montant: Optional[float] = Field(default=None, ge=0)
     # Envoyer "" efface la note ; ne pas envoyer la clé la laisse intacte
@@ -312,6 +357,11 @@ class OperationUpdate(BaseModel):
     notes: Optional[str] = None
     monnaie_id: Optional[int] = None
     statut: Optional[Statut] = None
+    # Les frais compris dans `montant` (cf. OperationBase.frais). Envoyer null
+    # les efface ; ne pas envoyer la clé les laisse intacts (update_operation lit
+    # exclude_unset), comme pour les notes.
+    frais: Optional[float] = Field(default=None, ge=0)
+    monnaie_frais_id: Optional[int] = None
     montant_du: Optional[float] = Field(default=None, ge=0)
     montant_a_rembourser: Optional[float] = Field(default=None, ge=0)
     recurrente: Optional[bool] = None
@@ -328,6 +378,9 @@ class OperationUpdate(BaseModel):
 
 
 class OperationRead(OperationBase):
+    # Redéclaré en lecture : les parts remontent avec leur id et leur rang,
+    # que l'écran réutilise pour les réafficher dans l'ordre saisi.
+    decoupes: list[DecoupeRead] = Field(default_factory=list)
     id: int
     # Dupliqué depuis la relation : évite au frontend de recharger la table des
     # types pour savoir dans quel onglet ranger la ligne.
@@ -372,6 +425,13 @@ class VirementCreate(BaseModel):
     monnaie_destination_id: Optional[int] = None
     nature: Optional[str] = None
     statut: Statut = Statut.reel
+    # LES FRAIS DU VIREMENT, déjà compris dans les deux montants ci-dessus —
+    # ajoutés à ce qui part, ou retranchés de ce qui arrive, selon la jambe que
+    # leur devise désigne (cf. services/import_bancaire._appliquer_frais). Ils
+    # sont posés sur CETTE jambe-là et sur elle seule : les porter des deux
+    # côtés les ferait lire deux fois.
+    frais: Optional[float] = Field(default=None, ge=0)
+    monnaie_frais_id: Optional[int] = None
     # Notes libres : la même sur les deux écritures, comme la date et le statut.
     # Un virement se saisit et se modifie d'un bloc, une note propre à une seule
     # de ses jambes n'aurait aucun endroit où se saisir.
@@ -505,7 +565,42 @@ class KpisMonnaieRead(BaseModel):
     total_entrees: float = 0.0
     total_sorties: float = 0.0
     variation_previsionnelle: float = 0.0
+    # CE QUI EST PASSÉ SUR LES COMPTES pendant la période, sans rien étaler ni
+    # retrancher : une dépense amortie en entier au mois où l'argent est sorti,
+    # une dépense remboursable sans déduire ce qu'on nous rendra, les règlements
+    # compris (cf. services/soldes.get_variation_brute). C'est ce que la carte
+    # « Variation du mois » affiche — la question qu'on se pose devant un relevé,
+    # et non « qu'est-ce que ce mois me coûte », à laquelle répondent les trois
+    # champs juste au-dessus.
+    variation_brute: float = 0.0
     depenses_par_categorie: list[DepenseParCategorie] = Field(default_factory=list)
+
+
+class SemaineDepensesRead(BaseModel):
+    """Une semaine du mois, et l'histogramme qu'elle porte.
+
+    `jour_debut` / `jour_fin` sont des JOURS DU MOIS (1 à 31), pas des dates :
+    l'écran les affiche tels quels (« 8 → 14 ») et n'a besoin de rien d'autre —
+    l'année et le mois sont ceux de la requête."""
+
+    numero: int
+    jour_debut: int
+    jour_fin: int
+    depenses: list[DepenseParCategorie] = Field(default_factory=list)
+
+
+class DepensesSemainesRead(BaseModel):
+    """L'histogramme du mois déplié en semaines, et leur moyenne.
+
+    LES DEUX ENSEMBLE, en une seule réponse : la bascule « une semaine /
+    Moyenne » de l'écran ne doit pas coûter un aller-retour, et la moyenne DOIT
+    être celle des semaines rendues ici — la recalculer à part ouvrirait
+    l'écart entre la barre moyenne et les barres qu'elle résume."""
+
+    annee: int
+    mois: int
+    semaines: list[SemaineDepensesRead] = Field(default_factory=list)
+    moyenne: list[DepenseParCategorie] = Field(default_factory=list)
 
 
 class DashboardRead(BaseModel):
@@ -829,6 +924,19 @@ class ImportLigne(BaseModel):
     nom_banque_categorie: str = ""
     nom_banque_compte: str = ""
     categorie_id: Optional[int] = None
+    # DÉCOUPE posée par une règle, DÉJÀ RÉSOLUE EN MONTANTS pour cette ligne-là
+    # (cf. services/regles_categorisation.resoudre_decoupes). Vide dans le cas
+    # courant. Non vide, elle remplace `categorie_id`, qui vaut alors None :
+    # l'aperçu montre les parts au lieu du menu de catégorie.
+    #
+    # Des montants et non des formules, parce que l'aperçu sert précisément à
+    # VOIR ce qui sera écrit : afficher « min(montant; 50) » sur une ligne à
+    # 32 € aurait laissé l'utilisateur faire le calcul lui-même.
+    decoupes: list[DecoupeInput] = Field(default_factory=list)
+    # Ce qui a empêché la découpe d'une règle d'aboutir sur cette ligne (formule
+    # qui déborde le montant, montant illisible). Affiché en avertissement dans
+    # l'aperçu : la ligne reste importable, simplement sans découpe.
+    decoupe_erreur: Optional[str] = None
     compte_id: Optional[int] = None
     # Libellé de la colonne « Sens » du relevé (« Débit », « C »...), vide pour
     # un preset qui ne la lit pas. Son effet est déjà appliqué à
@@ -1283,6 +1391,16 @@ class ImportPresetRead(BaseModel):
     dernier_import: Optional[datetime] = None
 
 
+class ColonnesImportEssai(BaseModel):
+    """Les colonnes d'un ESSAI de lecture (cf. POST /previsualiser).
+
+    Une enveloppe autour de la liste, et non la liste nue : le champ arrive en
+    JSON dans un formulaire multipart, et une racine d'objet se valide d'une
+    ligne là où une racine de tableau demande un `TypeAdapter`."""
+
+    colonnes: list[ColonneImportConfig]
+
+
 class ImportPresetCreate(BaseModel):
     nom: str = Field(min_length=1)
     compte_id: Optional[int] = None
@@ -1394,26 +1512,138 @@ class BaseDonneesRead(BaseModel):
     sauvegarde: Optional[str] = None
     revision_quittee: Optional[str] = None
 
+    # ---------- Emplacement : ce qui décide de l'écran de configuration ----------
+    # La base ouverte vit-elle dans le dossier de l'application, que la
+    # prochaine mise à jour remplacera (cf. database.chemin_a_risque) ?
+    a_risque: bool = False
+    # Faut-il exiger un choix AVANT de laisser entrer dans l'application ?
+    # `a_risque` sans les échappatoires (BUDGET_DB_PATH, mode développement) :
+    # le frontend n'a pas à connaître ces règles, il lit ce booléen.
+    configuration_requise: bool = False
+    # L'emplacement proposé par défaut dans l'écran de configuration, et le
+    # dossier de l'application dont il faut sortir : affichés pour que le choix
+    # se fasse en connaissance de cause, jamais appliqués sans geste.
+    chemin_propose: str = ""
+    dossier_application: str = ""
+    # Le chemin retenu au dernier passage, quand le fichier a disparu depuis
+    # (disque débranché, dossier renommé). L'application est alors repartie sur
+    # sa base par défaut, et c'est la seule chose à dire d'urgence.
+    base_memorisee_introuvable: Optional[str] = None
+    # Le choix survivra-t-il à la fermeture ? False quand le fichier de
+    # configuration n'a pas pu être écrit (profil en lecture seule) : la
+    # bascule vaut alors pour la session seulement, et il faut le dire plutôt
+    # que de laisser croire que c'est réglé.
+    choix_memorise: bool = True
+    # Renseigné par /parametres/base/installer seulement : « ouverte »,
+    # « déplacée » ou « créée ». Le frontend ne peut pas le déduire — il ne sait
+    # pas si le fichier existait avant sa requête.
+    action: Optional[str] = None
+
 
 class BaseDonneesUpdate(BaseModel):
     chemin: str = Field(min_length=1)
+
+
+class BaseDonneesInstaller(BaseModel):
+    """Mise en place de la base à un emplacement choisi : ouvrir un fichier
+    existant, déplacer la base actuelle, ou en créer une neuve. Un seul geste
+    côté écran, d'où une seule route — c'est le serveur qui voit lequel des
+    trois cas s'applique (cf. database.installer_base)."""
+
+    chemin: str = Field(min_length=1)
+    # Déplacer la base actuellement ouverte vers `chemin` plutôt que d'en créer
+    # une vide. Le cas normal du premier démarrage : la base par défaut vient
+    # d'être créée et remplie de ses valeurs initiales, la perdre serait
+    # absurde. Sans effet si un fichier existe déjà à destination.
+    deplacer_actuelle: bool = False
 
 
 # ---------- Règles de catégorisation ----------
 
 
 def _valider_condition(condition, champs_valides: set[str]):
-    """Le contrôle commun aux deux domaines de règles : un champ connu, une
-    valeur non vide. Seule la liste des champs change de l'un à l'autre."""
+    """Le contrôle commun aux deux domaines de règles : un champ connu, un
+    opérateur de la bonne famille, une valeur non vide. Seule la liste des
+    champs change de l'un à l'autre."""
     if condition.champ not in champs_valides:
         raise ValueError(
             f"champ inconnu : {condition.champ} "
             f"(attendus : {', '.join(sorted(champs_valides))})"
         )
+    # TEXTE ET NOMBRES NE SE COMPARENT PAS PAREIL, et l'opérateur doit aller
+    # avec son champ : « la nature est supérieure à 50 » et « le montant
+    # contient 12 » sont l'un et l'autre des règles qui ne correspondraient
+    # jamais à rien. Refusé ici plutôt que silencieusement faux à l'import.
+    admis = operateurs_admis(condition.champ)
+    if condition.operateur not in admis:
+        raise ValueError(
+            f"l'opérateur « {condition.operateur.value} » ne s'applique pas au "
+            f"champ « {condition.champ} » "
+            f"(possibles : {', '.join(sorted(o.value for o in admis))})"
+        )
     # Une valeur vide rendrait "contient" toujours vrai et "est" quasi
     # toujours faux : dans les deux cas la règle ne veut rien dire.
     if not condition.valeur.strip():
         raise ValueError("la valeur à comparer ne peut pas être vide")
+    return condition
+
+
+def _valider_valeurs(condition):
+    """PLUSIEURS MOTS-CLÉS POUR UNE SEULE CONDITION, combinés en ET.
+
+    CE QUE ÇA REMPLACE : une condition par mot-clé, dans un groupe « ET ».
+    Écrire « le libellé contient CARREFOUR et contient MARKET » demandait deux
+    lignes de formulaire là où on pense un seul test ; à cinq mots-clés, le
+    groupe devenait illisible et l'ordre des conditions donnait l'illusion de
+    compter.
+
+    `valeurs` EST LA FORME CANONIQUE, `valeur` la forme d'avant : une règle
+    écrite hier ne porte que `valeur`, et la relire doit donner la même chose
+    qu'aujourd'hui. La normalisation se fait donc À LA LECTURE COMME À
+    L'ÉCRITURE — les deux passent par ce validateur — et l'écran ne voit jamais
+    qu'une liste.
+
+    LES OPÉRATEURS NUMÉRIQUES N'EN PORTENT QU'UNE. « le montant est supérieur à
+    30 et à 50 » se dit « supérieur à 50 » : la liste n'ajouterait rien qu'un
+    piège. Ils gardent donc `valeur`, et `valeurs` reste vide.
+    """
+    numerique = condition.operateur in OPERATEURS_NOMBRE
+    mots = [mot.strip() for mot in condition.valeurs if mot and mot.strip()]
+
+    if numerique:
+        if len(mots) > 1:
+            raise ValueError(
+                "un opérateur numérique ne compare qu'une seule valeur"
+            )
+        # La liste éventuelle (un seul mot) redevient la valeur simple.
+        if mots and not condition.valeur.strip():
+            condition.valeur = mots[0]
+        condition.valeurs = []
+        return condition
+
+    if not mots:
+        # Forme d'avant : la valeur unique devient une liste d'un mot.
+        if not condition.valeur.strip():
+            raise ValueError("la valeur à comparer ne peut pas être vide")
+        mots = [condition.valeur.strip()]
+
+    # Deux fois le même mot-clé ne dit rien de plus, et le second ne pourrait
+    # jamais être ni vrai ni faux tout seul.
+    vus = set()
+    uniques = []
+    for mot in mots:
+        cle = mot.casefold()
+        if cle in vus:
+            continue
+        vus.add(cle)
+        uniques.append(mot)
+
+    condition.valeurs = uniques
+    # `valeur` garde le PREMIER mot plutôt que d'être vidée : c'est ce que lit
+    # une version de l'application antérieure à ce champ, et une règle qui
+    # cesserait de mordre après un retour en arrière serait pire qu'une règle
+    # qui mord un peu trop large.
+    condition.valeur = uniques[0]
     return condition
 
 
@@ -1423,14 +1653,26 @@ class ConditionRegle(BaseModel):
     Un seul champ par condition : pour en viser plusieurs, on ajoute autant de
     conditions dans un groupe "OU", ce qui rend la combinaison explicite au
     lieu de la cacher dans un OU implicite entre cases cochées.
+
+    PLUSIEURS MOTS-CLÉS, EN REVANCHE, tiennent dans une seule condition
+    (`valeurs`), combinés en ET : « contient CARREFOUR et contient MARKET »
+    est un seul test, et l'écrire en deux conditions n'apportait qu'une ligne
+    de formulaire de plus. Cf. `_valider_valeurs` pour la forme d'avant.
     """
 
     champ: str
     operateur: OperateurRegle
-    valeur: str
+    # La forme d'AVANT, gardée : une règle enregistrée avant `valeurs` ne porte
+    # que ce champ, et une version antérieure de l'app ne lit que lui. Après
+    # validation, il vaut toujours le premier mot-clé de `valeurs`.
+    valeur: str = ""
+    # LES MOTS-CLÉS, combinés en ET. Vide pour un opérateur numérique, qui n'en
+    # compare qu'un seul.
+    valeurs: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _check_champ(self):
+        _valider_valeurs(self)
         return _valider_condition(self, CHAMPS_REGLE_VALIDES)
 
 
@@ -1447,8 +1689,38 @@ class ConditionsRegle(BaseModel):
     groupes: list[GroupeRegle] = Field(min_length=1)
 
 
+class RegleDecoupeInput(BaseModel):
+    """Une part de la découpe qu'une règle impose : une catégorie et une
+    FORMULE (cf. services/formule_decoupe.py).
+
+    La formule est relue par le parseur DÈS L'ÉCRITURE : une règle qu'on
+    enregistre aujourd'hui s'appliquera à un import dans six mois, et découvrir
+    à ce moment-là qu'elle est illisible ferait échouer des lignes sans que rien
+    ne rattache la panne à la règle fautive."""
+
+    categorie_id: int
+    formule: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _check_formule(self):
+        # Import local : formule_decoupe vit sous services/, que schemas
+        # n'importe nulle part ailleurs. Le remonter en tête ferait dépendre
+        # tout le module des services pour une validation qui ne sert qu'ici.
+        from .services.formule_decoupe import FormuleInvalide, valider_formule
+
+        try:
+            valider_formule(self.formule)
+        except FormuleInvalide as erreur:
+            raise ValueError(f"formule invalide : {erreur}") from erreur
+        return self
+
+
 class RegleCategorisationBase(BaseModel):
     nom: str = Field(min_length=1)
+    # Note libre sur la règle (migration 0050) : POURQUOI elle existe, ce que
+    # le nom et les conditions ne disent pas. Jamais lue par l'application —
+    # rien ne la filtre, rien ne s'y déclenche, comme `SousFiltre.description`.
+    description: str = ""
     conditions: ConditionsRegle
     # Action, en deux temps : le type d'opération d'abord, puis la catégorie
     # -- cette dernière n'ayant de sens que pour les types à catégorie libre.
@@ -1456,6 +1728,12 @@ class RegleCategorisationBase(BaseModel):
     # le code du type depuis son id.
     type_id: int
     categorie_id: Optional[int] = None
+    # DÉCOUPE imposée par la règle. Vide = la règle pose une catégorie unique
+    # (`categorie_id`), comme avant. Les deux s'excluent : le routeur neutralise
+    # `categorie_id` dès qu'une découpe est donnée, plutôt que de refuser — un
+    # écran qui bascule d'un mode à l'autre ne doit jamais laisser en base une
+    # règle qui prétend classer de deux façons.
+    decoupes: list[RegleDecoupeInput] = Field(default_factory=list)
     # Compte EN FACE, pour le seul type « virement interne » : le relevé ne
     # nomme qu'un des deux comptes d'un virement, et sans le second la ligne
     # arrive incomplète dans l'aperçu. Neutralisé côté routeur pour tout autre
@@ -1467,6 +1745,37 @@ class RegleCategorisationBase(BaseModel):
     # règle qu'on vient d'écrire sans y réfléchir.
     arreter_apres: bool = True
 
+    @model_validator(mode="after")
+    def _check_decoupes(self):
+        """Ce qu'une découpe de règle doit respecter INDÉPENDAMMENT du montant.
+
+        Tout ce qui dépend du montant d'une ligne (la somme des parts, un
+        « reste » négatif) ne se vérifie qu'à l'import, ligne par ligne — cf.
+        services/formule_decoupe.repartir. Ici on ne juge que la forme.
+        """
+        if not self.decoupes:
+            return self
+        from .services.formule_decoupe import MOT_RESTE, est_reste
+
+        if len(self.decoupes) < 2:
+            raise ValueError(
+                "une découpe compte au moins deux parts ; pour une seule "
+                "catégorie, utilise categorie_id"
+            )
+        if len(self.decoupes) > NB_MAX_PARTS_DECOUPE:
+            raise ValueError(
+                f"une découpe ne peut pas dépasser {NB_MAX_PARTS_DECOUPE} parts"
+            )
+        categories = [part.categorie_id for part in self.decoupes]
+        if len(set(categories)) != len(categories):
+            # Deux parts pour la même catégorie donneraient deux lignes que
+            # l'histogramme rassemblerait de toute façon : autant les écrire
+            # comme une seule, avec la somme des deux formules.
+            raise ValueError("une même catégorie ne peut pas apparaître deux fois")
+        if sum(1 for part in self.decoupes if est_reste(part.formule)) > 1:
+            raise ValueError(f"une seule part peut valoir « {MOT_RESTE} »")
+        return self
+
 
 class RegleCategorisationCreate(RegleCategorisationBase):
     pass
@@ -1476,11 +1785,21 @@ class RegleCategorisationUpdate(RegleCategorisationBase):
     pass
 
 
+class RegleDecoupeRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    categorie_id: int
+    formule: str
+    ordre: int
+
+
 class RegleCategorisationRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
     nom: str
+    description: str = ""
     ordre: int
     actif: bool
     arreter_apres: bool
@@ -1491,6 +1810,7 @@ class RegleCategorisationRead(BaseModel):
     categorie_id: Optional[int] = None
     compte_autre_id: Optional[int] = None
     conditions: ConditionsRegle
+    decoupes: list[RegleDecoupeRead] = Field(default_factory=list)
 
 
 class ReordonnerRegles(BaseModel):
@@ -1527,6 +1847,10 @@ class ConditionsReglePlacement(BaseModel):
 
 class RegleImportPlacementBase(BaseModel):
     nom: str = Field(min_length=1)
+    # Note libre sur la règle (migration 0050) : POURQUOI elle existe, ce que
+    # le nom et les conditions ne disent pas. Jamais lue par l'application —
+    # rien ne la filtre, rien ne s'y déclenche, comme `SousFiltre.description`.
+    description: str = ""
     conditions: ConditionsReglePlacement
     # Ce que la ligne décrit. Pas de catégorie : un mouvement de titres n'en
     # porte pas.
@@ -1557,6 +1881,7 @@ class RegleImportPlacementRead(BaseModel):
 
     id: int
     nom: str
+    description: str = ""
     ordre: int
     actif: bool
     type_placement: TypeOperationPlacement
@@ -1600,6 +1925,12 @@ class SousFiltreTotal(BaseModel):
     depenses: float
     entrees: float
     solde: float
+    # L'histogramme du projet DANS CETTE MONNAIE, dans la forme exacte de celui
+    # du dashboard : l'écran le dessine avec la fonction de rendu du noyau
+    # (cf. extensions/projets/service_projets.depenses_par_categorie). Rangé ici
+    # plutôt qu'à côté des totaux, pour qu'une monnaie n'ait qu'un seul endroit
+    # où se lire.
+    depenses_par_categorie: list[DepenseParCategorie] = Field(default_factory=list)
 
 
 class SousFiltreRead(BaseModel):

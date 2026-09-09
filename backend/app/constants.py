@@ -178,39 +178,6 @@ TYPES_COMPTE_SYSTEME = {TYPE_COMPTE_COURANT, TYPE_COMPTE_EPARGNE, TYPE_COMPTE_PL
 TYPES_COMPTE_HORS_COURANT = {TYPE_COMPTE_EPARGNE, TYPE_COMPTE_PLACEMENT}
 
 
-class FrequenceRemuneration(str, enum.Enum):
-    """À quel rythme un compte d'épargne verse ses intérêts (extension
-    « Taux d'épargne »).
-
-    LE TAUX RESTE ANNUEL, TOUJOURS : c'est ainsi qu'une banque l'annonce, et
-    c'est la seule façon de comparer deux comptes. La fréquence ne change pas le
-    taux, elle dit à quelles DATES il est appliqué — et donc sur quel solde,
-    puisque le solde bouge entre deux versements. Un taux de 2 % versé chaque
-    jour et le même versé une fois l'an ne donnent pas la même chose dès qu'un
-    virement tombe au milieu de l'année.
-    """
-
-    annuelle = "annuelle"
-    mensuelle = "mensuelle"
-    hebdomadaire = "hebdomadaire"
-    journaliere = "journalière"
-
-
-# Combien de versements une année compte, par fréquence. Sert d'EXPOSANT au
-# coefficient de chaque période : un versement vaut (1 + taux/100) ^ (1/N).
-#
-# 365 et 52, sans correction bissextile ni décalage : le calcul affiché est une
-# projection, pas un relevé de banque. Prétendre au jour près sur une convention
-# que chaque banque définit à sa façon (Exact/365, 30/360…) donnerait une fausse
-# précision, pas une meilleure réponse.
-VERSEMENTS_PAR_AN = {
-    FrequenceRemuneration.annuelle: 1,
-    FrequenceRemuneration.mensuelle: 12,
-    FrequenceRemuneration.hebdomadaire: 52,
-    FrequenceRemuneration.journaliere: 365,
-}
-
-
 class SensAction(str, enum.Enum):
     """Direction d'une opération sur titres. Source de vérité du couple
     (OperationAction, Operation) : le sens de l'écriture d'espèces en découle
@@ -459,10 +426,44 @@ LIBELLES_STATUT_DEFAUT = {
 
 
 class OperateurRegle(str, enum.Enum):
+    """Les comparaisons qu'une condition de règle sait faire.
+
+    DEUX FAMILLES, et elles ne se mélangent pas : les quatre premières
+    comparent du TEXTE, les cinq suivantes des NOMBRES. Un champ n'admet que
+    celles de sa famille (cf. OPERATEURS_PAR_CHAMP) — « la nature est
+    supérieure à 50 » ne veut rien dire, et « le montant contient 12 » non plus.
+    """
+
     est = "est"
     nest_pas = "n'est pas"
     contient = "contient"
     ne_contient_pas = "ne contient pas"
+    # Numériques (montant). « égal à » double `est` plutôt que de le réemployer :
+    # 50 et 50,00 sont le même nombre et deux textes différents, et c'est
+    # justement ce que la famille numérique change.
+    egal = "égal à"
+    different = "différent de"
+    superieur = "supérieur à"
+    superieur_ou_egal = "supérieur ou égal à"
+    inferieur = "inférieur à"
+    inferieur_ou_egal = "inférieur ou égal à"
+
+
+#: Les opérateurs qui comparent du texte, et ceux qui comparent des nombres.
+OPERATEURS_TEXTE = {
+    OperateurRegle.est,
+    OperateurRegle.nest_pas,
+    OperateurRegle.contient,
+    OperateurRegle.ne_contient_pas,
+}
+OPERATEURS_NOMBRE = {
+    OperateurRegle.egal,
+    OperateurRegle.different,
+    OperateurRegle.superieur,
+    OperateurRegle.superieur_ou_egal,
+    OperateurRegle.inferieur,
+    OperateurRegle.inferieur_ou_egal,
+}
 
 
 class ConnecteurRegle(str, enum.Enum):
@@ -473,10 +474,30 @@ class ConnecteurRegle(str, enum.Enum):
     ou = "OU"
 
 
-# Champs comparables : uniquement du texte issu du relevé. Les opérateurs
-# disponibles sont tous textuels ; comparer un montant demanderait des
-# opérateurs numériques (<, >) qui n'existent pas ici.
-CHAMPS_REGLE_VALIDES = {"nature", "categorie_banque", "compte_banque"}
+# Champs comparables d'un relevé bancaire, et LA FAMILLE D'OPÉRATEURS de
+# chacun. Trois champs de texte, plus le MONTANT, qui ne se compare qu'avec des
+# opérateurs numériques.
+#
+# LE MONTANT EST TOUJOURS POSITIF ICI, comme dans toute l'application : le sens
+# (dépense / recette) est une colonne à part, jamais un signe. « supérieur à
+# 50 » veut donc dire « plus de 50 € en jeu », quel que soit le sens — et c'est
+# la seule lecture qui permette d'écrire une règle sans savoir à l'avance de
+# quel côté la ligne tombera.
+CHAMPS_REGLE_NUMERIQUES = {"montant"}
+CHAMPS_REGLE_VALIDES = {
+    "nature",
+    "categorie_banque",
+    "compte_banque",
+} | CHAMPS_REGLE_NUMERIQUES
+
+
+def operateurs_admis(champ: str) -> set:
+    """Les opérateurs qu'un champ accepte — l'unique endroit qui le dit.
+
+    Le schéma Pydantic le lit pour refuser une condition incohérente, et le
+    frontend expose la même partition dans son menu déroulant : sans cette
+    fonction, les deux listes auraient divergé au premier ajout d'opérateur."""
+    return OPERATEURS_NOMBRE if champ in CHAMPS_REGLE_NUMERIQUES else OPERATEURS_TEXTE
 
 # Pendant du précédent pour les relevés de compte-titres (modèle
 # RegleImportPlacement) : les clés du dict de ligne brute que
@@ -485,6 +506,13 @@ CHAMPS_REGLE_VALIDES = {"nature", "categorie_banque", "compte_banque"}
 # quantité, cours) n'y figurent : les opérateurs disponibles sont textuels, et
 # « le montant contient 12 » ne veut rien dire.
 CHAMPS_REGLE_PLACEMENT_VALIDES = {"type_brut", "nom_valeur_brut", "code_isin_brut"}
+
+#: Combien de parts une découpe peut porter, au plus. Une borne haute plutôt
+#: qu'aucune : rien dans le calcul ne s'écroule à cent parts, mais un formulaire
+#: qui en laisse créer autant n'a plus rien d'un formulaire, et une opération
+#: qu'on ne peut plus lire d'un coup d'oeil n'est plus classée, elle est
+#: éparpillée.
+NB_MAX_PARTS_DECOUPE = 20
 
 
 # ---------- Import de placements (extension « import-placements ») ----------

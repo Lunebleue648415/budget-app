@@ -23,6 +23,58 @@ permissions:
   contents: write # nécessaire pour créer la Release et y attacher les archives
 
 jobs:
+  # LA SUITE DE TESTS, SUR LES TROIS SYSTÈMES, AVANT TOUT LE RESTE.
+  #
+  # POURQUOI ELLE MANQUAIT ET POURQUOI C'EST UN PROBLÈME. Ce workflow ne
+  # vérifiait jusqu'ici que l'EMPAQUETAGE : PyInstaller passe, le bundle
+  # contient env.py et index.html. Un bundle peut se former parfaitement autour
+  # d'un calcul faux — une Release verte ne disait donc rien de ce que
+  # l'application calcule.
+  #
+  # POURQUOI SUR LES TROIS ET PAS SEULEMENT SUR UN. La suite ne tourne en
+  # développement que sur Windows. Or trois choses ne s'y comportent pas comme
+  # ailleurs : la CASSE des noms de fichiers (Windows l'ignore, Linux non — un
+  # fichier référencé sous une autre casse marche ici et échoue là-bas), la
+  # résolution des chemins, et le format des fins de ligne des relevés importés.
+  #
+  # AUCUNE DÉPENDANCE SYSTÈME, contrairement à la construction : les tests
+  # n'ouvrent aucune fenêtre (pywebview n'est jamais importé) et travaillent sur
+  # une base SQLite en mémoire. D'où l'absence du bloc apt-get de Linux.
+  tests:
+    name: Tests (${{ matrix.nom }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Un système qui échoue ne doit pas masquer l'état des deux autres :
+      # savoir que macOS seul casse est une information, tout annuler n'en est
+      # pas une.
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            nom: Windows
+          - os: ubuntu-latest
+            nom: Linux
+          - os: macos-latest
+            nom: macOS
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Dépendances Python
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+
+      # Depuis `backend/` : c'est la racine que conftest.py et les imports
+      # `from app import ...` supposent.
+      - name: Suite de tests
+        working-directory: backend
+        run: python -m pytest -q
+
   construire:
     name: ${{ matrix.nom }}
     runs-on: ${{ matrix.os }}
@@ -38,9 +90,34 @@ jobs:
           - os: ubuntu-latest
             nom: Linux
             archive: budget-app-linux
+          # DEUX RUNNERS macOS, ET NON UN. PyInstaller ne compile que pour
+          # l'architecture de la machine qui l'exécute : `macos-latest` désigne
+          # un runner Apple Silicon depuis le retrait des images Intel, et ne
+          # produisait donc qu'une application arm64. Un Mac Intel ne peut RIEN
+          # en faire — Rosetta traduit Intel vers ARM, jamais l'inverse.
+          #
+          # POURQUOI PAS UN SEUL BINAIRE `universal2`, qui éviterait à
+          # l'utilisateur d'avoir à choisir : PyInstaller exige que CHAQUE
+          # extension binaire embarquée le soit aussi, or `pydantic-core` ne
+          # publie que deux roues séparées (macosx_11_0_arm64 et
+          # macosx_10_12_x86_64) et aucune universal2. Il faudrait la
+          # recompiler soi-même en Rust pour les deux cibles ; deux archives
+          # coûtent une ligne dans le tableau des notes de version.
+          #
+          # `macos-15-intel` et non `macos-13`, retiré le 4 décembre 2025.
+          # C'est la DERNIÈRE image x86_64 d'Actions, disponible jusqu'en août
+          # 2027 — à peu près le moment où les Mac Intel sortiront du support
+          # de macOS (Tahoe est la dernière version à les accepter). Cette
+          # entrée est donc faite pour être retirée, pas pour durer.
+          #
+          # Rien d'autre à changer dans ce job : tous les pas qui distinguent
+          # macOS testent `runner.os == 'macOS'`, vrai sur les deux runners.
           - os: macos-latest
-            nom: macOS
-            archive: budget-app-macos
+            nom: macOS (Apple Silicon)
+            archive: budget-app-macos-arm64
+          - os: macos-15-intel
+            nom: macOS (Intel)
+            archive: budget-app-macos-x64
 
     steps:
       - uses: actions/checkout@v4
@@ -196,7 +273,10 @@ jobs:
 
   publier:
     name: Publier la Release
-    needs: [construire, extensions]
+    # `tests` en plus des deux autres : rien ne se publie sur une suite rouge.
+    # La construction, elle, tourne EN PARALLÈLE des tests plutôt qu'après —
+    # un échec de test ne doit pas priver du diagnostic de l'empaquetage.
+    needs: [tests, construire, extensions]
     runs-on: ubuntu-latest
     # Seulement sur un tag : un lancement manuel sert à vérifier que la
     # construction passe, pas à publier une version.
@@ -221,8 +301,28 @@ jobs:
             | Système | Archive | À savoir |
             |---|---|---|
             | Windows | `budget-app-windows.zip` | Rien à installer |
-            | macOS | `budget-app-macos.zip` | Application non signée : au premier lancement, **clic droit > Ouvrir** |
+            | macOS — puce Apple | `budget-app-macos-arm64.zip` | Mac M1 ou plus récent. Voir « Ouvrir l'app » ci-dessous |
+            | macOS — Intel | `budget-app-macos-x64.zip` | Mac à processeur Intel. Voir « Ouvrir l'app » ci-dessous |
             | Linux | `budget-app-linux.zip` | Nécessite WebKit2GTK (voir le README) |
+
+            **Quelle archive macOS ?** Menu  > *À propos de ce Mac*. Si la
+            ligne dit « Puce Apple M… », prends `arm64` ; si elle dit
+            « Processeur Intel », prends `x64`. Se tromper donne une
+            application que macOS refuse d'ouvrir.
+
+            ### Ouvrir l'app sous macOS
+
+            Elle n'est pas signée par un certificat Apple : macOS refuse le
+            premier lancement. **Depuis macOS 15 (Sequoia), le clic droit >
+            Ouvrir ne suffit plus** — Apple a retiré ce contournement.
+
+            Double-clique l'app (le refus est attendu), puis va dans
+            **Réglages Système > Confidentialité et sécurité**, descends
+            jusqu'à la section *Sécurité*, et clique **« Ouvrir quand même »**.
+            Une seule fois : les lancements suivants sont normaux.
+
+            Sur macOS 14 et antérieur, le **clic droit > Ouvrir** d'avant
+            fonctionne toujours.
 
             L'application fonctionne **hors ligne** : aucune donnée ne quitte
             ta machine. Seule exception, à installer soi-même : l'extension

@@ -57,7 +57,8 @@ quelque part où tu as le droit d'écrire, et lance `Budget App`.
 | Système | Archive | Au premier lancement |
 |---|---|---|
 | **Windows** | `budget-app-windows.zip` | SmartScreen affiche un écran bleu : clique *Informations complémentaires*, puis *Exécuter quand même*. |
-| **macOS** | `budget-app-macos.zip` | Clic droit sur l'app → *Ouvrir*, et confirme. Un double-clic sera refusé la première fois. Détails : [macOS](desktop/platforms/macos/README.md). |
+| **macOS** (puce Apple) | `budget-app-macos-arm64.zip` | Le refus est attendu : *Réglages Système → Confidentialité et sécurité → **Ouvrir quand même***. Détails : [macOS](desktop/platforms/macos/README.md). |
+| **macOS** (Intel) | `budget-app-macos-x64.zip` | Idem. Menu  → *À propos de ce Mac* dit lequel des deux tu as. |
 | **Linux** | `budget-app-linux.zip` | Un paquet à installer d'abord, le moteur d'affichage : [Linux](desktop/platforms/linux/README.md). |
 
 **Évite `Program Files`** (et `/Applications` sur macOS) : l'application crée sa

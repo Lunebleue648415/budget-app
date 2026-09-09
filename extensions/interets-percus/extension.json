@@ -1,0 +1,11 @@
+{
+  "nom": "Intérêts perçus",
+  "description": "Note ce que chaque compte d'épargne t'a RÉELLEMENT rapporté : un montant, une date, tels que le relevé les annonce. Les totaux se font par année et par monnaie, jamais deux devises additionnées. Remplace le système de taux d'intérêt : un taux annuel et une fréquence ne pouvaient reconstituer le bon chiffre que si l'app connaissait tous les mouvements du compte depuis son ouverture, et divergeaient du relevé dès qu'un taux changeait en cours d'année ou qu'un import était partiel. Aucun intérêt n'est écrit en opération : c'est un suivi d'affichage, qui ne touche ni aux soldes ni au dashboard. S'ouvre depuis la page Comptes, au-dessus des comptes d'épargne.",
+  "version": "2.0.0",
+  "backend": "backend.py",
+  "frontend": {
+    "html": "page.html",
+    "css": ["interets-percus.css"],
+    "js": ["interets-percus.js"]
+  }
+}

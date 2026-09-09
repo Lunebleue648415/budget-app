@@ -5,12 +5,17 @@
   "backend": "backend.py",
   "frontend": {
     "html": "page.html",
-    "css": ["regles.css"],
-    "js": ["regles.js"]
+    "css": [
+      "regles.css"
+    ],
+    "js": [
+      "regles.js"
+    ]
   },
   "navigation": {
     "type": "greffe",
     "hote": "parametres-correspondances",
-    "libelle": "Règles"
+    "libelle": "Règles",
+    "icone": "tool_logo.svg"
   }
 }

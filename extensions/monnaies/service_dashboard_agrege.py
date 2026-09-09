@@ -93,6 +93,9 @@ def dashboard_agrege(db, annee, mois, vue: str, vers_monnaie_id: int):
         agrege.valorisation_placements += kpi.valorisation_placements * coefficient
         agrege.total_entrees += kpi.total_entrees * coefficient
         agrege.total_sorties += kpi.total_sorties * coefficient
+        # La variation brute s'additionne comme les autres totaux : c'est une
+        # somme de montants, pas une différence recalculée.
+        agrege.variation_brute += kpi.variation_brute * coefficient
         for depense in kpi.depenses_par_categorie:
             _categorie_agregee(categories, depense, coefficient)
 

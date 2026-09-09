@@ -229,7 +229,26 @@ function ajouterNavigation(manifeste) {
   const bouton = document.createElement("button");
   bouton.type = "button";
   bouton.dataset.extension = manifeste.id;
-  bouton.textContent = t(navigation.libelle);
+  // `navigation.icone` : le nom d'un fichier de frontend/img, posé DEVANT le
+  // libellé — c'est ainsi que les onglets du noyau portent le leur (cf.
+  // .onglet-logo dans style.css). Facultatif : sans lui, le bouton n'a que son
+  // mot, comme avant.
+  if (navigation.icone) {
+    const logo = document.createElement("img");
+    logo.className = "onglet-logo";
+    // Encodé : le nom vient d'un fichier de l'extension, pas de l'app.
+    logo.src = `/img/${encodeURIComponent(navigation.icone)}`;
+    // `alt` vide, et pas le nom de l'onglet : le libellé est juste à côté, un
+    // lecteur d'écran le dirait deux fois.
+    logo.alt = "";
+    logo.width = 15;
+    logo.height = 15;
+    bouton.appendChild(logo);
+  }
+  // Un NŒUD DE TEXTE et non `textContent` : celui-ci effacerait l'image qu'on
+  // vient de poser. C'est aussi ce que la traduction du DOM statique sait
+  // remplacer sans toucher au reste du bouton.
+  bouton.appendChild(document.createTextNode(t(navigation.libelle)));
   bouton.style.display = manifeste.actif ? "" : "none";
 
   // Un ONGLET DANS UN ÉCRAN DU NOYAU (autre que Paramètres). Le clic est pris
@@ -294,7 +313,30 @@ function renommerOngletHote(navigation, actif) {
   if (bouton.dataset.libelleNoyau === undefined) {
     bouton.dataset.libelleNoyau = bouton.textContent;
   }
-  bouton.textContent = actif ? t(navigation.libelle) : bouton.dataset.libelleNoyau;
+
+  // `textContent` EFFACERAIT LE LOGO en même temps que le mot : le bouton est
+  // reconstruit pièce par pièce, comme le fait `ajouterNavigation` pour les
+  // onglets qu'une extension ajoute. L'image d'abord, le texte ensuite —
+  // l'ordre du DOM est celui de la lecture (cf. .onglet-logo dans style.css).
+  bouton.textContent = "";
+  if (actif && navigation.icone) {
+    const logo = document.createElement("img");
+    logo.className = "onglet-logo";
+    // Encodé : le nom vient d'un fichier de l'extension, pas de l'app.
+    logo.src = `/img/${encodeURIComponent(navigation.icone)}`;
+    // `alt` vide, et pas le nom de l'onglet : le libellé est juste à côté, un
+    // lecteur d'écran le dirait deux fois.
+    logo.alt = "";
+    logo.width = 15;
+    logo.height = 15;
+    bouton.appendChild(logo);
+  }
+  // ÉTEINTE, LA GREFFE REND L'ONGLET TEL QUE LE NOYAU L'ÉCRIT : son nom
+  // d'origine, et aucun logo — celui-ci appartient à l'extension, pas à la
+  // page qu'elle emprunte.
+  bouton.appendChild(
+    document.createTextNode(actif ? t(navigation.libelle) : bouton.dataset.libelleNoyau)
+  );
 }
 
 /**
@@ -490,6 +532,14 @@ let extensionsAnnoncees = [];
 function afficherModaleExtensions(extensions) {
   const nouvelles = extensions.filter((e) => e.nouvelle);
   if (nouvelles.length === 0) return;
+  // UNE QUESTION PLUS URGENTE EST POSÉE PAR-DESSUS : « Où ranger tes données ? »
+  // (cf. app.js::verifierEmplacementBase). Deux modales empilées cachent
+  // justement celle des deux qui bloque, et une annonce d'extension n'a aucune
+  // raison de passer devant. On ne dit rien ET ON NE MARQUE RIEN COMME ANNONCÉ :
+  // l'état des annonces vit côté serveur, le taire ici sans le noter fait
+  // simplement réapparaître la fenêtre au rechargement qui suit le choix.
+  const modaleBase = document.getElementById("modale-bdd");
+  if (modaleBase && modaleBase.style.display !== "none") return;
   extensionsAnnoncees = nouvelles.map((e) => e.id);
 
   const fond = document.getElementById("modale-extensions");

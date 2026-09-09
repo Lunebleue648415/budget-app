@@ -86,6 +86,57 @@ function totauxHtml(totaux) {
     .join("");
 }
 
+/**
+ * L'histogramme du projet ouvert : les mêmes barres que celles du dashboard,
+ * sur les seules opérations que le projet regroupe.
+ *
+ * ON RÉUTILISE `renderHistogrammeDepenses` DU NOYAU, telle quelle. Le serveur
+ * rend d'ailleurs les barres dans la forme exacte qu'elle attend (cf.
+ * service_projets.depenses_par_categorie) : couleurs par `couleur_index`,
+ * infobulle des trois plus grosses dépenses, tout vient avec. Un rendu maison
+ * aurait ressemblé à celui du dashboard le premier jour, et plus le second.
+ *
+ * UN GRAPHE PAR MONNAIE, comme les totaux juste au-dessus — l'app n'additionne
+ * jamais deux monnaies. Le nom de la monnaie n'est écrit qu'à partir de deux :
+ * au-dessus d'un graphe unique, il répéterait le symbole déjà collé à chaque
+ * montant.
+ *
+ * RIEN DU TOUT quand aucune barre n'a de quoi se dessiner (projet vide, ou qui
+ * ne contient que des entrées) : le titre disparaît avec le graphe, plutôt que
+ * d'annoncer un cadre vide.
+ */
+function renderHistogrammeProjet(totaux) {
+  const bloc = document.getElementById("projet-histogramme");
+  const titre = document.getElementById("projet-histogramme-titre");
+  bloc.innerHTML = "";
+
+  const avecDepenses = totaux.filter(
+    (total) => (total.depenses_par_categorie || []).length > 0
+  );
+  titre.style.display = avecDepenses.length > 0 ? "" : "none";
+  if (avecDepenses.length === 0) return;
+
+  avecDepenses.forEach((total) => {
+    const section = document.createElement("div");
+    section.className = "projet-histo-bloc";
+    if (avecDepenses.length > 1) {
+      const etiquette = document.createElement("div");
+      etiquette.className = "projet-histo-monnaie";
+      etiquette.textContent = total.monnaie_nom;
+      section.appendChild(etiquette);
+    }
+    // Le cadre porte la classe du noyau : c'est lui qui ancre l'infobulle
+    // (position relative) autant qu'il dessine la bordure.
+    const cadre = document.createElement("div");
+    cadre.className = "histogramme-cadre";
+    section.appendChild(cadre);
+    bloc.appendChild(section);
+    // APRÈS l'insertion dans le document : le rendu lit `clientWidth` pour
+    // fixer la largeur du SVG, et un élément détaché la donne à zéro.
+    renderHistogrammeDepenses(total.depenses_par_categorie, total.monnaie_id, cadre);
+  });
+}
+
 function renderProjets() {
   document.getElementById("projet-detail").style.display = "none";
   const bloc = document.getElementById("projets-liste");
@@ -191,6 +242,7 @@ async function ouvrirProjet(projet) {
   description.textContent = projetOuvert.description;
   description.style.display = projetOuvert.description ? "" : "none";
   document.getElementById("projet-detail-totaux").innerHTML = totauxHtml(projetOuvert.totaux);
+  renderHistogrammeProjet(projetOuvert.totaux);
   document.getElementById("projet-detail-nombre").textContent = t("{n} opération(s)", {
     n: projetOperations.length,
   });

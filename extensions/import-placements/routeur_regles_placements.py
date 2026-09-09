@@ -79,6 +79,7 @@ def create_regle(payload: schemas.RegleImportPlacementCreate, db: Session = Depe
     return crud.create_regle_import_placement(
         db,
         nom=payload.nom,
+        description=payload.description,
         conditions=payload.conditions.model_dump(mode="json"),
         type_placement=payload.type_placement.value,
         compte_autre_id=_compte_retenu(db, payload),
@@ -110,6 +111,7 @@ def update_regle(
         db,
         regle,
         nom=payload.nom,
+        description=payload.description,
         conditions=payload.conditions.model_dump(mode="json"),
         type_placement=payload.type_placement.value,
         compte_autre_id=_compte_retenu(db, payload),

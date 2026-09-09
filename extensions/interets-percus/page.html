@@ -1,0 +1,37 @@
+<!-- Écran de l'extension « Intérêts perçus », sous forme de FENÊTRE.
+
+     PAS D'ONGLET À ELLE, et c'est délibéré (le manifeste ne déclare aucune
+     `navigation`) : ce qu'un livret a rapporté se regarde en regardant ses
+     comptes d'épargne, pas dans une page séparée qu'il faut penser à ouvrir. Le
+     bouton qui ouvre cette fenêtre est donc posé par interets-percus.js à côté
+     du titre « Comptes d'épargne » de la page Comptes, et la page reste visible
+     derrière, assombrie et floutée — même fond que la fenêtre des extensions au
+     lancement (`.modale-fond` du noyau).
+
+     Sans `navigation`, le noyau pose ce fragment à la fin de <main> : la
+     fenêtre est en `position: fixed`, son emplacement dans le document n'a donc
+     aucune importance. -->
+<div id="modale-epargne" class="modale-fond" style="display:none" role="presentation">
+  <div class="modale modale-epargne" role="dialog" aria-modal="true"
+       aria-labelledby="modale-epargne-titre">
+    <div class="epargne-entete">
+      <h2 id="modale-epargne-titre">Intérêts perçus<i class="info-bulle" tabindex="0" data-info="Saisis ce que la banque t'a réellement versé, tel que le relevé l'annonce. Rien n'est calculé à ta place : un taux annuel ne peut pas retrouver le bon chiffre quand il change en cours d'année. Seuls les comptes d'épargne sont ici.">i</i></h2>
+      <button type="button" id="btn-epargne-fermer" class="epargne-fermer"
+              title="Fermer" aria-label="Fermer">&times;</button>
+    </div>
+
+    <p class="hint">
+      Ces montants sont un <strong>suivi d'affichage</strong> : aucun intérêt n'est écrit en
+      opération, aucun solde et aucun chiffre du dashboard n'en dépend. Si le versement figure sur
+      ton relevé, il entrera de lui-même par l'import — le saisir ici en plus ne le compterait pas
+      deux fois dans tes soldes, mais ne le remplace pas non plus.
+    </p>
+
+    <p class="hint" id="epargne-aucun-compte" style="display:none">
+      Aucun compte d'épargne. Crée-en un depuis Paramètres → Comptes en choisissant le type
+      « épargne », puis reviens ici.
+    </p>
+
+    <div id="epargne-comptes"></div>
+  </div>
+</div>

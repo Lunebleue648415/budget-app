@@ -5,13 +5,18 @@
   "backend": "backend.py",
   "frontend": {
     "html": "page.html",
-    "css": ["monnaies.css"],
-    "js": ["monnaies.js"]
+    "css": [
+      "monnaies.css"
+    ],
+    "js": [
+      "monnaies.js"
+    ]
   },
   "navigation": {
     "type": "parametres",
     "sous_section": "monnaies",
     "libelle": "Monnaies",
-    "groupe": "gauche"
+    "groupe": "gauche",
+    "icone": "currency_logo.svg"
   }
 }

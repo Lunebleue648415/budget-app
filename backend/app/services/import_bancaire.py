@@ -37,12 +37,20 @@ Une ligne classée par l'utilisateur en "Virement interne" ne décrit qu'un
 compte via le fichier bancaire : le compte connu de la ligne (ImportLigne.
 compte_id) est déduit émetteur ou récepteur selon le signe du montant
 bancaire d'origine (négatif = émetteur, positif = récepteur), affiché côté
-frontend. L'utilisateur peut compléter l'autre côté à la main
-(ImportLigne.compte_id_autre) ; tant qu'il ne l'a pas fait, la ligne reste une
-simple écriture sur le seul compte connu (comme toute opération classique,
-via create_operation_importee). Dès que les deux comptes sont connus,
-confirmer() crée un vrai virement double-écriture (crud.create_virement,
+frontend. L'autre côté se complète à la main (ImportLigne.compte_id_autre), et
+TANT QU'IL MANQUE LA LIGNE EST REFUSÉE (cf. _erreur_ligne) : n'en importer
+qu'une jambe laisserait une écriture orpheline, qu'aucun écran ne sait plus
+réparer ensuite — l'écran des virements l'affiche avec « - » en face et son
+édition ne peut que proposer de la supprimer. Dès que les deux comptes sont
+connus, confirmer() crée un vrai virement double-écriture (crud.create_virement,
 mêmes deux opérations liées par virement_id qu'un virement créé à la main).
+
+Des bases anciennes portent encore de telles demi-écritures, importées avant ce
+refus : elles n'ont pas de virement_id, l'écran les regroupe sous une clé
+`solo-<id>` et propose de les recréer. C'est le SEUL cas où un virement affiché
+sans compte en face l'est réellement — sinon, c'est un filtre de la page
+Opérations qui en cache la seconde jambe (cf. crud.get_operations,
+`paires_virement`).
 
 Détection de doublons : chaque ligne du fichier est comparée, dans son format
 brut intégral (toutes les colonnes, pas seulement celles mappées ci-dessus),
@@ -1156,6 +1164,33 @@ def _nom_compte(db, compte_id: Optional[int]) -> str:
     return compte.nom if compte else "?"
 
 
+class PresetAvecColonnes:
+    """Le preset tel qu'il SERAIT si ses colonnes étaient celles-ci.
+
+    POURQUOI UN MASQUE PLUTÔT QU'UN PARAMÈTRE DE PLUS. `preset.colonnes` est lu
+    à sept endroits de ce module — la lecture des lignes, l'aperçu du fichier,
+    et cinq drapeaux de `ContextePreset` — souvent à travers `_index_propriete`.
+    Faire descendre une liste de colonnes jusqu'à chacun aurait ajouté un
+    paramètre à toute la chaîne pour un cas qui ne concerne que la
+    prévisualisation.
+
+    RIEN N'EST ÉCRIT. Mutter `preset.colonnes` sur l'objet de session aurait
+    suffi à le rendre « sale », et la première écriture venue l'aurait
+    enregistré — c'est-à-dire aurait modifié le preset de l'utilisateur parce
+    qu'il a déplacé un en-tête pour voir. Le masque, lui, ne touche à rien : il
+    répond `colonnes` et laisse passer tout le reste.
+    """
+
+    __slots__ = ("_preset", "colonnes")
+
+    def __init__(self, preset, colonnes):
+        object.__setattr__(self, "_preset", preset)
+        object.__setattr__(self, "colonnes", colonnes)
+
+    def __getattr__(self, nom):
+        return getattr(self._preset, nom)
+
+
 def _index_propriete(preset, propriete: str) -> Optional[int]:
     """Le numéro de colonne affecté à une propriété, ou None si le preset ne la
     lit pas."""
@@ -1594,6 +1629,16 @@ def _resoudre_ligne(
             "nature": nature,
             "categorie_banque": nom_categorie_banque,
             "compte_banque": nom_compte_banque,
+            # LE MONTANT EN VALEUR ABSOLUE, comme partout dans l'app : le sens
+            # est une colonne, jamais un signe. « supérieur à 50 » veut donc
+            # dire « plus de 50 € en jeu », de quelque côté que la ligne tombe.
+            #
+            # Le montant du FICHIER, pas celui qu'aura l'opération : les frais
+            # ne sont imputés qu'après (ils dépendent du type, que ces règles
+            # sont justement en train de poser). Une règle qui vise « plus de
+            # 50 € » compare donc ce qu'on lit sur le relevé, ce qui est aussi
+            # la seule valeur que l'utilisateur a sous les yeux en l'écrivant.
+            "montant": abs(montant_op) if montant_op is not None else None,
         },
     )
     type_code = resultat_regle.type_code if resultat_regle else TypeOperation.classique.value
@@ -1654,7 +1699,34 @@ def _resoudre_ligne(
     categorie_id = None
     categorie_suggestion_auto = False
 
-    if TypeOperation(type_code) in TYPES_AVEC_CATEGORIE_LIBRE:
+    # LA DÉCOUPE D'UNE RÈGLE PASSE AVANT TOUT LE RESTE, et pour la même raison
+    # que la catégorie d'une règle : c'est une intention explicite. Résolue ici
+    # sur le montant FINAL (frais compris), qui est celui de l'opération à
+    # écrire — l'invariant « somme des parts = montant » porte sur lui.
+    decoupes_ligne: list = []
+    decoupe_erreur = None
+    if (
+        resultat_regle is not None
+        and resultat_regle.decoupes
+        and TypeOperation(type_code) in TYPES_AVEC_CATEGORIE_LIBRE
+    ):
+        parts, decoupe_erreur = regles_categorisation.resoudre_decoupes(
+            resultat_regle.decoupes, montant_final
+        )
+        decoupes_ligne = [
+            schemas.DecoupeInput(categorie_id=categorie, montant=part)
+            for categorie, part in (parts or [])
+        ]
+        # Une part unique ne serait pas une découpe (cf. crud.erreur_decoupes) :
+        # les formules ont beau être deux, elles ont pu n'en laisser qu'une
+        # au-dessus de zéro sur cette ligne. La catégorie ordinaire reprend
+        # alors la main, plus bas.
+        if len(decoupes_ligne) < 2:
+            decoupes_ligne = []
+
+    if decoupes_ligne:
+        pass
+    elif TypeOperation(type_code) in TYPES_AVEC_CATEGORIE_LIBRE:
         if resultat_regle is not None and resultat_regle.categorie_id is not None:
             # Catégorie posée par une règle : intention explicite de
             # l'utilisateur, elle ne redemande pas de confirmation (tout
@@ -1716,6 +1788,8 @@ def _resoudre_ligne(
         nom_banque_categorie=nom_categorie_banque,
         nom_banque_compte=nom_compte_banque,
         categorie_id=categorie_id,
+        decoupes=decoupes_ligne,
+        decoupe_erreur=decoupe_erreur,
         compte_id=compte_id,
         compte_id_autre=compte_id_autre,
         categorie_suggestion_auto=categorie_suggestion_auto,
@@ -1933,14 +2007,24 @@ def previsualiser(
     compte_id_defaut: Optional[int] = None,
     delimiteur: Optional[str] = None,
     separateur_decimal: Optional[str] = None,
+    colonnes: Optional[list] = None,
 ) -> schemas.ImportPreview:
     """`delimiteur` et `separateur_decimal` (None par défaut, tous les deux) :
     réglages de LECTURE que l'utilisateur peut préciser à la main quand l'app
     n'arrive pas à lire le fichier (beaucoup de lignes en « date illisible »
     ou « montant illisible » dans l'aperçu qui en résulte) — jamais mémorisés
     sur le preset, ils ne valent que pour cet essai. Cf. _lire_lignes_csv et
-    parser_montant, à qui ils sont simplement transmis."""
+    parser_montant, à qui ils sont simplement transmis.
+
+    `colonnes` est de la même famille : ce que l'écran a SOUS LES YEUX, qui n'est
+    pas forcément ce que le preset porte en base. C'est ce qui permet de
+    réorganiser les colonnes — en déplaçant les en-têtes de l'aperçu, ou en
+    corrigeant leurs numéros — et de VOIR le résultat avant de décider de
+    l'enregistrer. Rien n'est écrit : le preset ne change qu'au moment où on le
+    demande (cf. PresetAvecColonnes)."""
     preset = crud.get_import_preset(db, preset_id)
+    if colonnes is not None:
+        preset = PresetAvecColonnes(preset, colonnes)
     lignes_existantes_brutes = crud.list_lignes_import_brutes(db, preset_id)
     colonnes_comparaison = preset.colonnes_comparaison
     mode_comparaison = preset.mode_comparaison
@@ -2025,7 +2109,14 @@ def _erreur_ligne(ligne: schemas.ImportLigne) -> Optional[str]:
         manques.append("virement interne : le sens de la ligne est indéterminé")
     if not ligne.nature:
         manques.append("nature manquante")
-    if ligne.categorie_id is None and TypeOperation(ligne.type_code) in TYPES_AVEC_CATEGORIE_LIBRE:
+    # UNE LIGNE DÉCOUPÉE EST CLASSÉE, même sans `categorie_id` : ses parts SONT
+    # sa classification (cf. models.OperationDecoupe), exactement comme un type
+    # à catégorie imposée dispense des deux lignes suivantes.
+    if (
+        ligne.categorie_id is None
+        and not ligne.decoupes
+        and TypeOperation(ligne.type_code) in TYPES_AVEC_CATEGORIE_LIBRE
+    ):
         manques.append("catégorie non résolue")
     if ligne.compte_id is None:
         manques.append("compte non résolu")
@@ -2189,6 +2280,50 @@ def _montants_virement(
     return (ligne.montant, None) if sortante else (None, ligne.montant)
 
 
+def _jambe_manquante(
+    ligne: schemas.ImportLigne,
+    montant_envoye: Optional[float],
+    montant_recu: Optional[float],
+) -> tuple[Optional[float], Optional[float]]:
+    """La jambe que le relevé ne décrit pas, déduite de celle qu'il décrit ET
+    DES FRAIS.
+
+    LES FRAIS NE TRAVERSENT PAS. Ils vont à la banque, pas au compte d'en face :
+    virer 100 € avec 2 € de frais fait perdre 102 € à l'émetteur et n'en fait
+    gagner que 100 au récepteur. Le patrimoine perd donc 2 € — et c'est
+    exactement ce qui manquait.
+
+    LE DÉFAUT QUE ÇA CORRIGE. La jambe manquante reprenait purement et
+    simplement l'autre, frais compris : l'émetteur perdait 102, le récepteur
+    gagnait 102, et les frais s'annulaient d'un compte à l'autre. Le solde total
+    de l'app dépassait alors celui de la banque de la somme de tous les frais de
+    virement jamais importés — un écart qui grandit à chaque import, sans que
+    rien ne le signale.
+
+    LES DEUX SENS SE DÉDUISENT PAREIL, parce que `_appliquer_frais` a déjà posé
+    les frais sur la jambe que le relevé décrit :
+
+      - relevé de l'ÉMETTEUR : `montant_envoye` vaut le viré + les frais ; ce
+        qui arrive en face est donc `montant_envoye - frais` ;
+      - relevé du RÉCEPTEUR : `montant` vaut le viré - les frais ; ce qui est
+        parti d'en face est donc `montant + frais`.
+
+    Dans les deux cas, la jambe manquante vaut le montant HORS FRAIS.
+
+    SEULEMENT SANS CHANGE — l'appelant ne s'en sert que là (cf. confirmer). Entre
+    deux monnaies, retrancher des frais à ce qui part ne dit rien de ce qui
+    arrive : il faudrait un taux, et l'app n'en connaît aucun.
+    """
+    frais = abs(ligne.frais) if ligne.frais else 0.0
+    if montant_envoye is None and montant_recu is not None:
+        return montant_recu + frais, montant_recu
+    if montant_recu is None and montant_envoye is not None:
+        # Jamais négatif : `montant_envoye` vaut le hors-frais PLUS les frais
+        # (cf. _appliquer_frais), la soustraction rend donc le hors-frais.
+        return montant_envoye, max(0.0, montant_envoye - frais)
+    return montant_envoye, montant_recu
+
+
 def _monnaies_virement(
     ligne: schemas.ImportLigne,
     compte_source: "models.Compte",
@@ -2249,12 +2384,15 @@ def confirmer(
     compte_id_defaut: Optional[int] = None,
     delimiteur: Optional[str] = None,
     separateur_decimal: Optional[str] = None,
+    colonnes: Optional[list] = None,
 ) -> schemas.ImportResultat:
-    # `delimiteur` / `separateur_decimal` : cf. previsualiser, mêmes réglages
-    # — DOIVENT être ceux avec lesquels l'aperçu confirmé a été construit, sans
-    # quoi le fichier serait relu autrement à la confirmation qu'à l'aperçu
-    # (mêmes lignes en erreur qu'avant, silencieusement, ou pire, des lignes
-    # importées avec des montants faux).
+    # `delimiteur` / `separateur_decimal` / `colonnes` : cf. previsualiser,
+    # mêmes réglages — et TOUS LES TROIS doivent être ceux avec lesquels
+    # l'aperçu confirmé a été construit, sans quoi le fichier serait relu
+    # autrement à la confirmation qu'à l'aperçu (mêmes lignes en erreur qu'avant,
+    # silencieusement, ou pire, des lignes importées avec des montants faux).
+    # C'est ce qui permet de valider une réorganisation de colonnes SANS l'avoir
+    # enregistrée : on importe exactement ce qu'on vient de relire.
     #
     # Mémorise les choix de reclassification pour les imports suivants avant
     # de relire les lignes, pour qu'elles bénéficient immédiatement des
@@ -2267,6 +2405,8 @@ def confirmer(
         crud.set_mapping_monnaie(db, preset_id, nom_banque, monnaie_id)
 
     preset = crud.get_import_preset(db, preset_id)
+    if colonnes is not None:
+        preset = PresetAvecColonnes(preset, colonnes)
     lignes_existantes_brutes = crud.list_lignes_import_brutes(db, preset_id)
     colonnes_comparaison = preset.colonnes_comparaison
     mode_comparaison = preset.mode_comparaison
@@ -2368,6 +2508,23 @@ def confirmer(
             # jambes comme le ferait un relevé qui porte la colonne.
             if "montant_envoye" in retouches:
                 retouches["montant_envoye_deduit"] = False
+            # UNE RETOUCHE QUI CONTREDIT LA DÉCOUPE LA DÉFAIT. Trois cas, et un
+            # seul geste : choisir une catégorie à la main, c'est dire qu'on ne
+            # veut plus des parts ; changer le montant rompt l'égalité « somme
+            # des parts = montant », qu'aucune répartition automatique ne peut
+            # rétablir sans décider à la place de l'utilisateur ; changer le
+            # type peut sortir de `classique`, seul type qui se découpe.
+            #
+            # La ligne repasse alors « catégorie non résolue » si rien ne la
+            # classe (cf. _erreur_ligne) : l'aperçu la signale et en redemande
+            # une, plutôt que d'importer en silence une ligne dont le classement
+            # vient de disparaître.
+            if ligne.decoupes and (
+                "categorie_id" in retouches
+                or "montant" in retouches
+                or retouches.get("type_code", ligne.type_code) != ligne.type_code
+            ):
+                retouches["decoupes"] = []
             ligne = ligne.model_copy(update=retouches)
             # Le montant qui fait l'opération dépend du TYPE et du SENS : les
             # changer dans l'aperçu change la jambe qui compte, donc le montant
@@ -2438,11 +2595,17 @@ def confirmer(
                 continue
             montant_envoye, montant_recu = _montants_virement(ligne)
             memes_monnaies = monnaie_source_id == monnaie_destination_id
-            # Le relevé ne décrit que la jambe de son compte. Sans change, la
-            # jambe manquante vaut l'autre — même monnaie, même montant. Avec
-            # change, elle reste inconnue et c'est à l'utilisateur de la dire
-            # (message plus bas pour le montant reçu, ici pour l'envoyé, qui
-            # manque quand le relevé est celui du compte RÉCEPTEUR).
+            # Le relevé ne décrit que la jambe de son compte. SANS CHANGE, la
+            # jambe manquante se déduit de l'autre — au montant près des FRAIS,
+            # qui vont à la banque et ne traversent donc pas (cf.
+            # _jambe_manquante). Avec change, elle reste inconnue et c'est à
+            # l'utilisateur de la dire (message plus bas pour le montant reçu,
+            # ci-dessous pour l'envoyé, qui manque quand le relevé est celui du
+            # compte RÉCEPTEUR).
+            if memes_monnaies:
+                montant_envoye, montant_recu = _jambe_manquante(
+                    ligne, montant_envoye, montant_recu
+                )
             if montant_envoye is None:
                 if not memes_monnaies:
                     lignes_ignorees.append(
@@ -2471,6 +2634,13 @@ def confirmer(
                     # deux monnaies sont identiques, d'où l'erreur ci-dessous.
                     montant_destination=montant_recu,
                     monnaie_destination_id=monnaie_destination_id,
+                    # Les frais que les deux montants contiennent déjà : gardés
+                    # pour que l'écran puisse redécomposer la jambe qu'ils
+                    # grèvent, jamais relus par un calcul (cf.
+                    # models.Operation.frais). C'est `crud._jambe_des_frais` qui
+                    # décide laquelle des deux les porte.
+                    frais=ligne.frais or None,
+                    monnaie_frais_id=ligne.monnaie_frais_id,
                     nature=ligne.nature or None,
                     # Portée par les deux jambes, comme pour un virement saisi à
                     # la main (cf. VirementCreate.notes). L'amortissement, lui,
@@ -2573,6 +2743,7 @@ def confirmer(
             compte_id=ligne.compte_id,
             type_id=ids_types[ligne.type_code],
             categorie_id=ligne.categorie_id,
+            decoupes=ligne.decoupes,
             nature=ligne.nature,
             montant=ligne.montant,
             monnaie_id=monnaie_ligne_id,
@@ -2583,6 +2754,11 @@ def confirmer(
             amorti=ligne.amorti,
             amortissement_debut=ligne.amortissement_debut,
             amortissement_fin=ligne.amortissement_fin,
+            # Déjà compris dans `montant` (ajoutés à ce qui sort, retranchés de
+            # ce qui entre) : conservés pour que l'écran sache de quoi ce montant
+            # est fait, et puisse le laisser corriger.
+            frais=ligne.frais or None,
+            monnaie_frais_id=ligne.monnaie_frais_id,
         )
         a_stocker.append((donnees_par_ligne[ligne.ligne], operation.id))
         operations_creees += 1

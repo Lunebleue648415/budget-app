@@ -32,6 +32,39 @@ def set_note(payload: schemas.NoteDashboardUpdate, db: Session = Depends(get_db)
     return schemas.NoteDashboardRead(contenu=note.contenu, modifie_le=note.modifie_le)
 
 
+@router.get("/semaines", response_model=schemas.DepensesSemainesRead)
+def get_depenses_semaines(
+    monnaie_id: int,
+    annee: Optional[int] = None,
+    mois: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    """L'histogramme des dépenses d'un mois, DÉPLIÉ en semaines.
+
+    Déclaré AVANT la route racine n'est pas nécessaire (les chemins ne se
+    recouvrent pas), mais la route reste ici, à côté du dashboard qu'elle
+    détaille.
+
+    UNE SEULE MONNAIE, et elle est obligatoire : l'app n'additionne jamais deux
+    monnaies, et cette vue détaille l'onglet de monnaie qu'on regarde déjà — il
+    n'y a pas de raison de calculer les onze autres pour n'en montrer qu'une.
+
+    PAS DE VUE ANNÉE : les semaines découpent un MOIS. Déplier une année en
+    cinquante-deux barres ne serait plus un histogramme, et « la moyenne des
+    semaines du mois » n'aurait plus de mois.
+    """
+    aujourdhui = date.today()
+    annee = annee if annee is not None else aujourdhui.year
+    mois = mois if mois is not None else aujourdhui.month
+    if mois < 1 or mois > 12:
+        raise HTTPException(status_code=400, detail="mois doit être entre 1 et 12")
+
+    # Même topping-up que le dashboard : cette route se lit sans être passée par
+    # lui (rechargement de page sur l'histogramme déplié).
+    crud.generer_occurrences_recurrentes(db)
+    return soldes.get_depenses_par_semaine(db, annee, mois, monnaie_id)
+
+
 @router.get("", response_model=schemas.DashboardRead)
 def get_dashboard(
     annee: Optional[int] = None,
@@ -113,6 +146,9 @@ def get_dashboard(
                 total_entrees=flux["entrees"],
                 total_sorties=flux["sorties"],
                 variation_previsionnelle=flux["variation"],
+                variation_brute=soldes.get_variation_brute(
+                    db, annee, mois, monnaie.id
+                ),
                 depenses_par_categorie=[
                     schemas.DepenseParCategorie(**item)
                     for item in soldes.get_depenses_par_categorie(db, annee, mois, monnaie.id)

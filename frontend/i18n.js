@@ -235,8 +235,8 @@ const TRADUCTIONS = {
     "Total des avoirs": "Total assets",
     "Tous comptes confondus, courant + \u00e9pargne": "All accounts, current + savings",
     "R\u00e9partition des avoirs": "Asset allocation",
-    "Agr\u00e9g\u00e9 par type de comptes":
-      "Aggregated by account type",
+    "La part du total des avoirs pos\u00e9e sur chaque type de compte, dans la monnaie choisie. Solde R\u00c9EL, titres d\u00e9tenus compris \u2014 pas le pr\u00e9visionnel.":
+      "The share of total holdings sitting on each account type, in the chosen currency. REAL balance, securities held included \u2014 not the projected one.",
     "Aucun solde positif \u00e0 r\u00e9partir.": "No positive balance to break down.",
     "R\u00e9partition des avoirs par type de compte": "Asset breakdown by account type",
     "Comptes courants": "Current accounts",
@@ -253,8 +253,6 @@ const TRADUCTIONS = {
     "Total entr\u00e9es": "Money in",
     "Total sorties": "Money out",
     "Diff\u00e9rence": "Difference",
-    "Les entr\u00e9es moins les sorties sur la p\u00e9riode, virements internes exclus.":
-      "Money in minus money out over the period, internal transfers excluded.",
     "Notes": "Notes",
     "Un pense-b\u00eate, non lu par l'app. \u00c7a s'enregistre tout seul.":
       "A scratchpad, never read by the app. It saves itself.",
@@ -307,6 +305,41 @@ const TRADUCTIONS = {
     "doublons : toutes sauf {n}": "duplicates: all but {n}",
     "doublons : {n} colonne(s) comparée(s)": "duplicates: {n} column(s) compared",
     "Amortie sur plusieurs mois": "Spread over several months",
+    // Découpe d'une opération entre plusieurs catégories.
+    "Découper entre plusieurs catégories": "Split across several categories",
+    // Les six opérateurs numériques d'une condition de règle (le champ
+    // « Montant »). Les quatre opérateurs de texte sont déjà plus haut.
+    "égal à": "equal to",
+    "différent de": "different from",
+    "supérieur à": "greater than",
+    "supérieur ou égal à": "greater than or equal to",
+    "inférieur à": "less than",
+    "inférieur ou égal à": "less than or equal to",
+    // La découpe posée par une règle.
+    "découpée": "split",
+    "La découpe ci-dessous tient lieu de catégorie.":
+      "The split below stands in for the category.",
+    "Une seule part peut valoir « reste ».": "Only one part can be \u00ab reste \u00bb.",
+    "La règle répartit le montant de la ligne entre plusieurs catégories, au lieu d'en poser une seule. Réservé aux opérations classiques.":
+      "The rule spreads the amount of the line across several categories instead of setting a single one. Plain operations only.",
+    "+ Ajouter une part": "+ Add a part",
+    "Chaque part dit combien elle prend. On peut écrire un nombre (50), un pourcentage (30%), une opération (montant - 50), ou utiliser min et max — par exemple min(montant; 50) pour « au plus 50 € ». Le mot reste donne à une part tout ce que les autres n'ont pas pris ; une seule part peut le porter, et la somme doit valoir le montant de la ligne.":
+      "Each part says how much it takes. Write a number (50), a percentage (30%), an expression (montant - 50), or use min and max \u2014 for instance min(montant; 50) for \u00ab at most 50 \u20ac \u00bb. The word reste gives a part whatever the others did not take; only one part can carry it, and the total must match the amount of the line.",
+    "Une seule opération, plusieurs catégories : un plein de courses dont une part de produits ménagers. Le total des parts doit valoir le montant de l'opération.":
+      "One operation, several categories: a grocery run with a share of household products. The parts must add up to the amount of the operation.",
+    "Ajouter une part": "Add a part",
+    "Retirer cette part": "Remove this part",
+    "Réparti": "Allocated",
+    "reste à placer": "left to allocate",
+    "Une découpe compte au moins deux parts remplies.":
+      "A split needs at least two filled parts.",
+    "Une même catégorie ne peut pas apparaître deux fois dans la découpe.":
+      "The same category cannot appear twice in a split.",
+    "Le total des parts doit valoir le montant de l'opération.":
+      "The parts must add up to the amount of the operation.",
+    "Découpée": "Split",
+    "parts": "parts",
+    "Voir le détail de la découpe": "Show the split details",
     "La dépense reste datée du jour où l'argent est sorti — les soldes et les KPI du haut du dashboard ne bougent pas. Seuls l'histogramme et les totaux de la période répartissent son montant sur les mois choisis.":
       "The expense keeps the date the money actually left — balances and the KPIs at the top of the dashboard do not move. Only the chart and the period totals spread its amount over the chosen months.",
     "Premier mois": "First month",
@@ -375,11 +408,10 @@ const TRADUCTIONS = {
     "Mettre \u00e0 jour les cours": "Update prices",
     "Pages reconnues": "Supported pages",
     "mis \u00e0 jour {quand}": "updated {quand}",
-    // ----- Volet titres : le formulaire « Suivre un cours en ligne » -----
-    "Suivre un cours en ligne": "Track a price online",
+    // ----- Volet titres : le lien de cotation déplié sous chaque titre -----
+    // Le formulaire « Suivre un cours en ligne » a été retiré : la flèche de
+    // chaque rangée déplie le champ de lien du titre qu'on regarde déjà.
     "Lien de la page de cotation": "Quote page link",
-    "Enregistrer le lien": "Save link",
-    "d\u00e9j\u00e0 suivi": "already tracked",
     // ----- Volet monnaies : les taux de change -----
     "Taux de change": "Exchange rates",
     "Le taux d'un couple de monnaies, relu sur la page de cotation dont tu colles le lien. Rien n'est converti avec : les soldes, les budgets et les KPI restent suivis monnaie par monnaie, et ce taux ne sert qu'\u00e0 \u00eatre lu ici.":
@@ -805,8 +837,6 @@ const TRADUCTIONS = {
     "Cat\u00e9gorie supprim\u00e9e": "Category deleted",
     "Budget modifi\u00e9": "Budget updated",
     "Cat\u00e9gorie cr\u00e9\u00e9e": "Category created",
-    "Ce virement n'a qu'une \u00e9criture (second compte inconnu \u00e0 l'import) : ":
-      "This transfer has only one entry (the second account was unknown at import): ",
     "Supprimer cette op\u00e9ration ?": "Delete this transaction?",
     "Op\u00e9ration supprim\u00e9e": "Transaction deleted",
     "Renseigne le montant re\u00e7u : les deux comptes sont dans des monnaies diff\u00e9rentes ":
@@ -988,6 +1018,35 @@ const TRADUCTIONS = {
     "Aucun compte.": "No account.",
     "Aucun compte dans cette monnaie.": "No account in this currency.",
     "Aucune d\u00e9pense enregistr\u00e9e.": "No spending recorded.",
+    // ----- Le détail par semaine de l'histogramme -----
+    "D\u00e9tailler par semaine": "Break down by week",
+    "Moyenne": "Average",
+    "Replier les semaines": "Collapse the weeks",
+    "ann\u00e9e {annee}": "year {annee}",
+    "du {debut} au {fin} {mois}": "{mois} {debut} to {fin}",
+    "moyenne des {n} semaines de {mois}": "average of the {n} weeks of {mois}",
+    // ----- Les cartes de flux, sous le sélecteur de période -----
+    "Total Entr\u00e9es": "Total money in",
+    "Total D\u00e9penses": "Total spending",
+    "Ce que la p\u00e9riode rapporte, virements internes exclus. Un pr\u00eat re\u00e7u n'y entre pas : il faudra le rendre. Reste sur le mois entier, semaine d\u00e9pli\u00e9e ou non.":
+      "What the period brings in, internal transfers excluded. A loan received is not counted: it will have to be paid back. Stays on the whole month, week unfolded or not.",
+    "Ce que la p\u00e9riode co\u00fbte, et non ce qui sort du compte : une d\u00e9pense amortie ne compte que pour sa part du mois, une remboursable pour le reste \u00e0 charge. Virements internes exclus. Reste sur le mois entier, semaine d\u00e9pli\u00e9e ou non.":
+      "What the period costs, not what leaves the account: an amortised expense only counts for its share of the month, a reimbursable one for the amount left to bear. Internal transfers excluded. Stays on the whole month, week unfolded or not.",
+    "De combien les comptes courants ont boug\u00e9 sur la p\u00e9riode. Tout compte \u00e0 sa date et pour son montant : une d\u00e9pense amortie en entier, une d\u00e9pense remboursable sans d\u00e9duire ce qu'on rendra. Virements internes exclus.":
+      "How much the current accounts moved over the period. Everything counts on its date and for its amount: an amortised expense in full, a reimbursable one without deducting what will come back. Internal transfers excluded.",
+    // ----- L'histogramme d'un projet (extension « Projets ») -----
+    "R\u00e9partition par cat\u00e9gorie": "Breakdown by category",
+    "Les sorties du projet, r\u00e9parties par cat\u00e9gorie \u2014 virements sortants compris, comme dans le total ci-dessus. Les entr\u00e9es n'y figurent pas : elles se lisent dans le total des entr\u00e9es.":
+      "The project's outflows, split by category \u2014 outgoing transfers included, as in the total above. Inflows are not shown: they are read in the inflow total.",
+    // ----- La note d'une règle d'import (migration 0050) -----
+    "ex. la banque \u00e9crit \u00ab VIR RECU M DUPONT \u00bb pour les remboursements de Paul":
+      "e.g. the bank writes \u201cVIR RECU M DUPONT\u201d for Paul's repayments",
+    "ex. ce courtier \u00e9crit \u00ab ACHAT COMPTANT \u00bb suivi du nom du titre":
+      "e.g. this broker writes \u201cACHAT COMPTANT\u201d followed by the security's name",
+    "Note libre : pourquoi cette r\u00e8gle existe, quel relev\u00e9 l'a rendue n\u00e9cessaire, ce qu'il faudra v\u00e9rifier si elle cesse de mordre. Jamais lue par l'application.":
+      "Free note: why this rule exists, which statement made it necessary, what to check if it stops matching. Never read by the application.",
+    "Note libre : pourquoi cette r\u00e8gle existe, quel relev\u00e9 l'a rendue n\u00e9cessaire. Jamais lue par l'application.":
+      "Free note: why this rule exists, which statement made it necessary. Never read by the application.",
     // Infobulle d'une barre de l'histogramme (cf. contenuInfobulleHistogramme).
     "Aucune op\u00e9ration sur la p\u00e9riode.": "No transaction over this period.",
     "Sans libell\u00e9": "No label",
@@ -1117,9 +1176,16 @@ const TRADUCTIONS = {
     "contient": "contains",
     "ne contient pas": "does not contain",
     "Si": "If",
+    // Un virement dont une seule jambe est à l'écran : deux causes, deux gestes.
+    "Cette \u00e9criture n'a pas de seconde jambe (virement import\u00e9 sans compte en face) : supprime-la et recr\u00e9e le virement avec ses deux comptes.":
+      "This entry has no second leg (transfer imported without a facing account): delete it and create the transfer again with both accounts.",
+    "La seconde \u00e9criture de ce virement n'est pas dans la liste affich\u00e9e : vide les filtres pour la modifier.":
+      "The second entry of this transfer is not in the list shown: clear the filters to edit it.",
     "ET": "AND",
     "OU": "OR",
     "ou": "or",
+    // Ce qui relie les mots-clés d'une seule condition (cf. extensions/regles).
+    "et": "and",
 
     // ---------- Extension « Import de placements » ----------
     "Import de placements": "Investment import",
@@ -1245,6 +1311,38 @@ const TRADUCTIONS = {
     "Les mots que ton courtier emploie pour dire achat, vente ou mouvement d'esp\u00e8ces. Ajoute-les un par un avec \u00ab + \u00bb ou Entr\u00e9e ; majuscules, accents et espaces sont ignor\u00e9s. Une liste vide retombe sur les mots par d\u00e9faut, un libell\u00e9 inconnu met la ligne en erreur.":
       "The words your broker uses for purchase, sale or cash movement. Add them one at a time with \u201c+\u201d or Enter; case, accents and spaces are ignored. An empty list falls back on the default words, an unknown label puts the row in error.",
     "Ajouter ce mot-cl\u00e9": "Add this keyword",
+    // ----- Les frais d'une opération, décomposés dans le formulaire -----
+    "Frais": "Fees",
+    "Monnaie des frais": "Fee currency",
+    " (hors frais)": " (before fees)",
+    "Montant re\u00e7u": "Amount received",
+    "Les frais que la banque a pr\u00e9lev\u00e9s, d\u00e9j\u00e0 compris dans le montant : ajout\u00e9s \u00e0 ce qui sort, retranch\u00e9s de ce qui entre. Le montant au-dessus est donc affich\u00e9 hors frais, et les deux se recomposent \u00e0 l'enregistrement.":
+      "The fees the bank charged, already included in the amount: added to what goes out, taken from what comes in. The amount above is therefore shown before fees, and the two are recombined on save.",
+    "La devise des frais dit \u00e0 quel montant ils s'appliquent : sur un virement entre deux monnaies, des frais dans la monnaie envoy\u00e9e gr\u00e8vent ce qui part, dans la monnaie re\u00e7ue ce qui arrive.":
+      "The fee currency says which amount they apply to: on a transfer between two currencies, fees in the sent currency weigh on what leaves, in the received currency on what arrives.",
+    // ----- Réorganiser les colonnes en glissant les en-têtes de l'aperçu -----
+    "Cette colonne n'existe pas dans le fichier : d\u00e9place son en-t\u00eate sur une colonne r\u00e9elle.":
+      "This column does not exist in the file: drag its header onto a real column.",
+    "Les colonnes color\u00e9es sont celles que l'app va lire, les grises sont ignor\u00e9es. Deux fa\u00e7ons de corriger un d\u00e9calage : glisser un en-t\u00eate sur un autre pour \u00e9changer les deux colonnes, ou saisir les num\u00e9ros dans \u00ab Configuration du fichier \u00bb au-dessus.":
+      "Coloured columns are the ones the app will read, grey ones are ignored. Two ways to fix a mismatch: drag one header onto another to swap the two columns, or type the numbers in \u201cFile configuration\u201d above.",
+    "Les colonnes ont chang\u00e9 depuis la derni\u00e8re lecture. Relire le fichier pour voir ce que l'import donnera, puis \u00ab Enregistrer la configuration \u00bb pour garder cet ordre dans le preset.":
+      "The columns have changed since the last read. Read the file again to see what the import will give, then use \u201cSave configuration\u201d to keep this order in the preset.",
+    "Glisse cet en-t\u00eate sur un autre pour \u00e9changer les deux colonnes":
+      "Drag this header onto another one to swap the two columns",
+    "Relire le fichier avec la configuration actuelle":
+      "Read the file again with the current configuration",
+    "Les colonnes ont chang\u00e9 : relire le fichier pour voir ce que l'import donnera.":
+      "The columns have changed: read the file again to see what the import will give.",
+    "Aucun fichier charg\u00e9 \u00e0 relire.": "No file loaded to read again.",
+    "Fichier relu. \u00ab Enregistrer la configuration \u00bb pour garder cet ordre de colonnes dans le preset.":
+      "File read again. Use \u201cSave configuration\u201d to keep this column order in the preset.",
+    // Les mots-clés d'une condition de règle : le même éditeur, dans une rangée
+    // où le mot « Actualisation » de l'import n'aurait rien dit.
+    "Retirer": "Remove",
+    "Mots-cl\u00e9s": "Keywords",
+    "Aucun mot-cl\u00e9 : la condition ne compare rien.":
+      "No keyword: the condition compares nothing.",
+    "ex. PRET": "e.g. LOAN",
     Actualisation: "Refresh",
     Versement: "Deposit",
     "Aucun mot-cl\u00e9 \u2014 les mots par d\u00e9faut s'appliquent.":
@@ -1417,6 +1515,7 @@ const TRADUCTIONS = {
     "Titre renomm\u00e9": "Security renamed",
     "Nom du courtier r\u00e9tabli": "Broker's name restored",
     "Afficher le lien de cotation": "Show the quotation link",
+    "Cours relu en ligne": "Price read online",
 
     // ---------- Taux d'\u00e9pargne : la fen\u00eatre ----------
     "G\u00e9rer les taux d'int\u00e9r\u00eat": "Manage interest rates",

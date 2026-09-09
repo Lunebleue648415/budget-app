@@ -11,12 +11,42 @@
  * les consulter (services/import_bancaire.ContexteImport).
  */
 
-const OPERATEURS_REGLE = ["est", "n'est pas", "contient", "ne contient pas"];
+/* DEUX FAMILLES D'OPÉRATEURS, ET ELLES NE SE MÉLANGENT PAS : les quatre
+ * premiers comparent du TEXTE, les six suivants des NOMBRES. Un champ n'admet
+ * que ceux de sa famille — « la nature est supérieure à 50 » ne veut rien dire,
+ * et « le montant contient 12 » non plus. Le serveur refuse la combinaison
+ * (cf. constants.operateurs_admis) ; le menu ci-dessous ne la propose même pas.
+ */
+const OPERATEURS_TEXTE = ["est", "n'est pas", "contient", "ne contient pas"];
+const OPERATEURS_NOMBRE = [
+  "égal à",
+  "différent de",
+  "supérieur à",
+  "supérieur ou égal à",
+  "inférieur à",
+  "inférieur ou égal à",
+];
+// Conservé sous son ancien nom : d'autres endroits du fichier le lisent pour
+// afficher un opérateur, sans se soucier de sa famille.
+const OPERATEURS_REGLE = [...OPERATEURS_TEXTE, ...OPERATEURS_NOMBRE];
 const CHAMPS_REGLE = [
   ["nature", "Nature / libellé"],
   ["categorie_banque", "Catégorie bancaire"],
   ["compte_banque", "Compte bancaire"],
+  // LE MONTANT EST TOUJOURS POSITIF, comme partout dans l'app : le sens
+  // (dépense / recette) est une colonne à part, jamais un signe. « supérieur à
+  // 50 » veut donc dire « plus de 50 € en jeu », quel que soit le sens.
+  ["montant", "Montant"],
 ];
+const CHAMPS_REGLE_NUMERIQUES = new Set(["montant"]);
+
+function operateursAdmis(champ) {
+  return CHAMPS_REGLE_NUMERIQUES.has(champ) ? OPERATEURS_NOMBRE : OPERATEURS_TEXTE;
+}
+
+// Le type auquel la découpe est réservée : les autres portent une catégorie
+// imposée, un montant dû ou une contrepartie (cf. crud.erreur_decoupes).
+const TYPE_REGLE_DECOUPABLE = "classique";
 
 let reglesChargees = [];
 // Brouillon de la règle en cours d'édition : les groupes ne sont écrits en
@@ -43,7 +73,20 @@ function remplirSelecteurTypesRegle() {
 }
 
 function conditionVide() {
-  return { champ: "nature", operateur: "contient", valeur: "" };
+  // `valeurs` est la forme canonique côté serveur : plusieurs mots-clés,
+  // combinés en ET. `valeur` la suit (elle vaut le premier mot) pour les
+  // opérateurs de texte, et porte le nombre pour les opérateurs numériques,
+  // qui n'en comparent qu'un.
+  return { champ: "nature", operateur: "contient", valeur: "", valeurs: [] };
+}
+
+/** Les mots-clés d'une condition, quelle que soit la forme où elle arrive. */
+function motsClesCondition(condition) {
+  if (Array.isArray(condition.valeurs) && condition.valeurs.length > 0) {
+    return condition.valeurs;
+  }
+  const seul = (condition.valeur || "").trim();
+  return seul ? [seul] : [];
 }
 
 function groupeVide() {
@@ -71,13 +114,35 @@ function renderRegles() {
   renderReglesGalerie();
 }
 
+/**
+ * La note de la règle sur sa carte, ou rien du tout.
+ *
+ * AU-DESSUS DES CONDITIONS, et non en bas de carte : c'est ce qu'on lit en
+ * premier quand on cherche laquelle des vingt règles est celle qu'on veut.
+ * Les conditions, elles, se relisent une fois la bonne trouvée.
+ *
+ * Rien n'est affiché quand la note est vide — c'est-à-dire pour toutes les
+ * règles écrites avant qu'elle existe : une ligne vide sous chaque titre
+ * aurait allongé la liste sans rien y ajouter.
+ */
+function descriptionRegleHtml(regle) {
+  const note = (regle.description || "").trim();
+  if (!note) return "";
+  return `<div class="regle-carte-description">${escapeHtml(note)}</div>`;
+}
+
 function libelleConditionRegle(condition) {
   // `champs` (pluriel) : ancienne forme, avant le passage au champ unique.
   const champs = condition.champ ? [condition.champ] : condition.champs || [];
   const libelle = champs
     .map((c) => (CHAMPS_REGLE.find(([v]) => v === c) || [c, c])[1])
     .join(` ${t("ou")} `);
-  return `${t(libelle)} ${t(condition.operateur)} « ${condition.valeur} »`;
+  // TOUS LES MOTS-CLÉS, séparés par « et » : une condition qui en porte trois
+  // et n'en montrerait qu'un ferait passer une règle pour plus large qu'elle.
+  const mots = motsClesCondition(condition)
+    .map((mot) => `« ${mot} »`)
+    .join(` ${t("et")} `);
+  return `${t(libelle)} ${t(condition.operateur)} ${mots}`;
 }
 
 function resumeRegle(regle) {
@@ -100,6 +165,14 @@ function actionRegleHtml(regle) {
         )}</span>`;
   }
   if (!TYPES_CATEGORIE_LIBRE.has(regle.type_code)) return libelleType;
+  // La découpe remplace la catégorie unique : elles répondent à la même
+  // question, et la règle n'y répond jamais deux fois.
+  if (regle.decoupes && regle.decoupes.length > 0) {
+    const parts = regle.decoupes
+      .map((part) => `${nomCategorie(part.categorie_id)} (${part.formule})`)
+      .join(", ");
+    return `${libelleType}, ${t("découpée")} : ${parts}`;
+  }
   return regle.categorie_id != null
     ? `${libelleType}, catégorie « ${nomCategorie(regle.categorie_id)} »`
     : libelleType;
@@ -128,6 +201,7 @@ function renderReglesListe() {
           ${regle.nom}
           ${regle.actif ? "" : '<span class="badge-aucun">inactive</span>'}
         </div>
+        ${descriptionRegleHtml(regle)}
         <div class="regle-carte-conditions">${t("Si")} ${resumeRegle(regle)}</div>
         <div class="regle-carte-action">→ ${actionRegleHtml(regle)}</div>
         ${badgeChainageHtml(regle)}
@@ -290,30 +364,117 @@ function renderRegleGroupes() {
           </label>`
       ).join("");
 
+      // Le menu d'opérateurs et le champ de valeur SUIVENT le champ choisi :
+      // texte ou nombre, ce ne sont ni les mêmes comparaisons ni la même
+      // saisie. Redessinés à chaque changement de champ (cf. plus bas), plutôt
+      // que d'afficher dix opérateurs dont six ne s'appliqueraient pas.
+      const optionsOperateur = (champ, choisi) =>
+        operateursAdmis(champ)
+          .map((o) => `<option value="${o}" ${o === choisi ? "selected" : ""}>${o}</option>`)
+          .join("");
+      const estNumerique = CHAMPS_REGLE_NUMERIQUES.has(condition.champ);
+
+      // LA VALEUR SE SAISIT DE DEUX FAÇONS, selon la famille de l'opérateur :
+      //
+      //   - un NOMBRE, dans un champ ordinaire — « supérieur à 30 et à 50 » se
+      //     dit « supérieur à 50 », une liste n'y ajouterait qu'un piège ;
+      //   - des MOTS-CLÉS, dans l'éditeur à jetons du noyau, celui-là même que
+      //     l'import utilise pour le vocabulaire des colonnes « Sens » et
+      //     « État ». Ils se combinent en ET : « contient CARREFOUR et
+      //     contient MARKET » est UN test, et l'écrire en deux conditions
+      //     n'ajoutait qu'une ligne de formulaire — à cinq mots-clés, le
+      //     groupe devenait illisible.
+      const idJetons = `regle-mots-${iGroupe}-${iCondition}`;
+      const saisieValeur = estNumerique
+        ? `<input type="number" step="0.01" min="0" data-role="valeur"
+                  placeholder="${t("ex. 50")}"
+                  value="${(condition.valeur || "").replace(/"/g, "&quot;")}" />`
+        : `<div class="regle-condition-mots" data-role="mots">
+             <div class="import-vocabulaire-champ" data-vocabulaire="mots">
+               <div class="import-vocabulaire-entete">
+                 <div class="import-vocabulaire-saisie">
+                   <input type="text" spellcheck="false" placeholder="${t("ex. PRET")}" />
+                   <button type="button" class="import-vocabulaire-ajouter"
+                           title="${t("Ajouter ce mot-clé")}"
+                           aria-label="${t("Ajouter ce mot-clé")}">+</button>
+                 </div>
+                 <details class="import-vocabulaire-actualisation">
+                   <summary>${t("Retirer")}</summary>
+                   <div class="import-vocabulaire-menu" data-role="menu"></div>
+                 </details>
+               </div>
+               <div class="import-vocabulaire-jetons" data-role="jetons"></div>
+             </div>
+           </div>`;
+
       ligne.innerHTML = `
         <div class="regle-condition-champs">${champsHtml}</div>
         <select data-role="operateur">
-          ${OPERATEURS_REGLE.map(
-            (o) => `<option value="${o}" ${o === condition.operateur ? "selected" : ""}>${o}</option>`
-          ).join("")}
+          ${optionsOperateur(condition.champ, condition.operateur)}
         </select>
-        <input type="text" data-role="valeur" placeholder="ex. PRET" value="${(condition.valeur || "").replace(/"/g, "&quot;")}" />
+        ${saisieValeur}
         <button type="button" class="danger" data-role="supprimer-condition" ${
           groupe.conditions.length === 1 ? "disabled" : ""
         }>×</button>
       `;
 
+      if (!estNumerique) {
+        // UN ÉDITEUR PAR CONDITION, redéclaré à chaque rendu : cette ligne est
+        // reconstruite dès qu'on touche à un champ voisin, et un éditeur qui
+        // garderait l'ancien nœud n'écouterait plus rien (cf.
+        // creerEditeurMotsCles, qui remplace un groupe posé sur un autre
+        // élément).
+        //
+        // `onChange` REÉCRIT LE BROUILLON : c'est lui qui part au serveur, et
+        // aller relire les jetons au moment d'enregistrer aurait ouvert un
+        // écart entre ce qu'on voit et ce qu'on envoie.
+        creerEditeurMotsCles(idJetons, {
+          conteneur: ligne.querySelector("[data-role='mots']"),
+          libelles: { mots: t("Mots-clés") },
+          vide: "Aucun mot-clé : la condition ne compare rien.",
+          onChange: (_cle, mots) => {
+            condition.valeurs = [...mots];
+            // `valeur` suit, pour rester lisible par une version de l'app
+            // antérieure à `valeurs` — c'est ce que le serveur fait de son
+            // côté (cf. schemas._valider_valeurs).
+            condition.valeur = mots[0] || "";
+          },
+        });
+        chargerMotsCles(idJetons, { mots: motsClesCondition(condition) });
+      }
+
       ligne.querySelectorAll(".regle-condition-champs input").forEach((radio) => {
         radio.addEventListener("change", () => {
-          if (radio.checked) condition.champ = radio.value;
+          if (!radio.checked) return;
+          const changeDeFamille =
+            CHAMPS_REGLE_NUMERIQUES.has(radio.value) !==
+            CHAMPS_REGLE_NUMERIQUES.has(condition.champ);
+          condition.champ = radio.value;
+          if (changeDeFamille) {
+            // L'opérateur d'avant n'existe plus dans la nouvelle famille :
+            // le garder aurait envoyé au serveur une condition qu'il refuse.
+            // On repart du premier opérateur admis, et de la valeur vide —
+            // « PRET » ne veut rien dire comme montant, et 50 ne veut rien
+            // dire comme libellé.
+            condition.operateur = operateursAdmis(radio.value)[0];
+            condition.valeur = "";
+            condition.valeurs = [];
+            renderRegleGroupes();
+          }
         });
       });
       ligne.querySelector("[data-role='operateur']").addEventListener("change", (e) => {
         condition.operateur = e.target.value;
       });
-      ligne.querySelector("[data-role='valeur']").addEventListener("input", (e) => {
-        condition.valeur = e.target.value;
-      });
+      // Seul le champ NUMÉRIQUE écrit ici : les mots-clés passent par
+      // `onChange` de leur éditeur.
+      const champValeur = ligne.querySelector("input[data-role='valeur']");
+      if (champValeur) {
+        champValeur.addEventListener("input", (e) => {
+          condition.valeur = e.target.value;
+          condition.valeurs = [];
+        });
+      }
       ligne.querySelector("[data-role='supprimer-condition']").addEventListener("click", () => {
         groupe.conditions.splice(iCondition, 1);
         renderRegleGroupes();
@@ -351,11 +512,14 @@ function majVisibiliteCompteAutreRegle() {
 
 function majVisibiliteCategorieRegle() {
   majVisibiliteCompteAutreRegle();
+  majVisibiliteDecoupeRegle();
   const type = document.getElementById("regle-type").value;
   const bloc = document.getElementById("regle-categorie-bloc");
   const info = document.getElementById("regle-categorie-imposee");
   const select = document.getElementById("regle-categorie");
-  const libre = TYPES_CATEGORIE_LIBRE.has(type);
+  // La découpe REMPLACE la catégorie unique : montrer les deux laisserait
+  // croire qu'une règle peut classer deux fois la même ligne.
+  const libre = TYPES_CATEGORIE_LIBRE.has(type) && !regleDecoupeEstActive();
 
   if (libre) {
     bloc.style.display = "";
@@ -370,10 +534,90 @@ function majVisibiliteCategorieRegle() {
     if (select.value) regleCategorieMemorisee = select.value;
     select.value = "";
     bloc.style.display = "none";
-    info.textContent = `« ${libelleTypeOperation(type)} » ne porte pas de catégorie : le type est à lui seul la classification.`;
+    // Deux raisons de masquer la catégorie, et deux messages : le type n'en
+    // porte pas, ou la découpe a pris sa place. Le second n'est pas un
+    // avertissement — juste le rappel de ce qui classe la ligne.
+    info.textContent = regleDecoupeEstActive()
+      ? t("La découpe ci-dessous tient lieu de catégorie.")
+      : `« ${libelleTypeOperation(type)} » ne porte pas de catégorie : le type est à lui seul la classification.`;
     info.style.display = "";
   }
 }
+
+/* ---------- La découpe qu'une règle impose ---------- */
+/*
+ * DES FORMULES, PAS DES MONTANTS. Une règle s'écrit une fois pour des lignes
+ * dont elle ignore le montant : « les 50 premiers euros en Repas, le reste en
+ * Sorties » ne se dit pas avec deux nombres fixes. La grammaire acceptée est
+ * décrite sous l'éditeur, et relue par le serveur à l'enregistrement
+ * (cf. services/formule_decoupe.py) — une formule illisible est refusée tout
+ * de suite, et pas six mois plus tard au milieu d'un import.
+ */
+
+function regleDecoupeEstActive() {
+  return (
+    document.getElementById("regle-type").value === TYPE_REGLE_DECOUPABLE &&
+    document.getElementById("regle-decoupee").checked
+  );
+}
+
+function lignesDecoupeRegle() {
+  return [...document.querySelectorAll("#regle-decoupe-parts .regle-decoupe-part")];
+}
+
+function lireDecoupesRegle() {
+  return lignesDecoupeRegle()
+    .map((ligne) => ({
+      categorie_id: Number(ligne.querySelector(".regle-decoupe-categorie").value),
+      formule: ligne.querySelector(".regle-decoupe-formule").value.trim(),
+    }))
+    .filter((part) => part.categorie_id && part.formule);
+}
+
+function ajouterPartDecoupeRegle(categorieId = null, formule = "") {
+  const conteneur = document.getElementById("regle-decoupe-parts");
+  const ligne = document.createElement("div");
+  ligne.className = "regle-decoupe-part";
+  ligne.innerHTML = `
+    <select class="regle-decoupe-categorie"></select>
+    <input type="text" class="regle-decoupe-formule" placeholder="ex. min(montant; 50)"
+           value="${(formule || "").replace(/"/g, "&quot;")}" />
+    <button type="button" class="danger" data-role="supprimer-part">×</button>
+  `;
+  conteneur.appendChild(ligne);
+  const select = ligne.querySelector(".regle-decoupe-categorie");
+  fillCategoriesSelect(select, state.categories, { keepFirst: true });
+  if (categorieId != null) select.value = categorieId;
+  ligne.querySelector("[data-role='supprimer-part']").addEventListener("click", () => {
+    ligne.remove();
+  });
+}
+
+function majVisibiliteDecoupeRegle() {
+  const decoupable = document.getElementById("regle-type").value === TYPE_REGLE_DECOUPABLE;
+  // Décochée dès qu'elle cesse d'être proposée : une case cochée mais invisible
+  // enverrait des parts que le serveur refuserait pour ce type (400).
+  if (!decoupable) document.getElementById("regle-decoupee").checked = false;
+  document.getElementById("regle-decoupee-bloc").style.display = decoupable ? "" : "none";
+  document.getElementById("regle-decoupe-bloc").style.display = regleDecoupeEstActive()
+    ? ""
+    : "none";
+}
+
+document.getElementById("regle-decoupee").addEventListener("change", () => {
+  // Deux parts d'emblée : une découpe en compte au moins deux, et cocher la
+  // case pour tomber sur une liste vide obligerait à deviner le geste suivant.
+  if (regleDecoupeEstActive() && lignesDecoupeRegle().length === 0) {
+    ajouterPartDecoupeRegle();
+    ajouterPartDecoupeRegle(null, "reste");
+  }
+  majVisibiliteCategorieRegle();
+});
+
+document
+  .getElementById("btn-regle-decoupe-ajouter")
+  .addEventListener("click", () => ajouterPartDecoupeRegle());
+
 
 function ouvrirEditeurRegle(regle = null) {
   document.getElementById("regle-editeur").style.display = "";
@@ -382,6 +626,7 @@ function ouvrirEditeurRegle(regle = null) {
     : "Nouvelle règle";
   document.getElementById("regle-id").value = regle ? regle.id : "";
   document.getElementById("regle-nom").value = regle ? regle.nom : "";
+  document.getElementById("regle-description").value = regle ? regle.description || "" : "";
   document.getElementById("regle-connecteur").value = regle ? regle.conditions.operateur : "ET";
   document.getElementById("regle-actif").checked = regle ? regle.actif : true;
   // Cochée par défaut sur une règle neuve : c'est le comportement qu'on attend
@@ -401,6 +646,13 @@ function ouvrirEditeurRegle(regle = null) {
   );
   document.getElementById("regle-compte-autre").value =
     regle && regle.compte_autre_id != null ? String(regle.compte_autre_id) : "";
+
+  // AVANT majVisibiliteCategorieRegle, qui lit la case pour décider d'afficher
+  // les parts ou la catégorie unique.
+  const parts = regle && regle.decoupes ? regle.decoupes : [];
+  document.getElementById("regle-decoupe-parts").innerHTML = "";
+  document.getElementById("regle-decoupee").checked = parts.length > 0;
+  parts.forEach((part) => ajouterPartDecoupeRegle(part.categorie_id, part.formule));
 
   majVisibiliteCategorieRegle();
 
@@ -442,7 +694,7 @@ document.getElementById("btn-regle-enregistrer").addEventListener("click", async
         showMessage(t("Chaque condition doit porter sur un champ."), "error");
         return;
       }
-      if (!condition.valeur.trim()) {
+      if (motsClesCondition(condition).length === 0) {
         showMessage(t("Chaque condition doit avoir une valeur à comparer."), "error");
         return;
       }
@@ -450,23 +702,51 @@ document.getElementById("btn-regle-enregistrer").addEventListener("click", async
   }
 
   const type = document.getElementById("regle-type").value;
+  // La découpe : les mêmes refus que le serveur, dits ici avec les mots de
+  // l'écran (cf. schemas.RegleCategorisationBase._check_decoupes). Les
+  // formules elles-mêmes ne sont relues que par lui — le parseur vit là-bas,
+  // et en écrire un second en JavaScript aurait fait deux grammaires à tenir
+  // d'accord.
+  const decoupes = regleDecoupeEstActive() ? lireDecoupesRegle() : [];
+  if (regleDecoupeEstActive()) {
+    if (decoupes.length < 2) {
+      showMessage(t("Une découpe compte au moins deux parts remplies."), "error");
+      return;
+    }
+    const categories = decoupes.map((part) => part.categorie_id);
+    if (new Set(categories).size !== categories.length) {
+      showMessage(
+        t("Une même catégorie ne peut pas apparaître deux fois dans la découpe."),
+        "error"
+      );
+      return;
+    }
+    if (decoupes.filter((part) => part.formule.trim().toLowerCase() === "reste").length > 1) {
+      showMessage(t("Une seule part peut valoir « reste »."), "error");
+      return;
+    }
+  }
   // La catégorie n'est transmise que si le type l'accepte : basculer vers un
   // type à catégorie imposée l'outrepasse, sans avoir à la vider à la main.
-  const categorieVal = TYPES_CATEGORIE_LIBRE.has(type)
-    ? document.getElementById("regle-categorie").value
-    : "";
+  // Une découpe la remplace, exactement comme le serveur la neutralise.
+  const categorieVal =
+    TYPES_CATEGORIE_LIBRE.has(type) && decoupes.length === 0
+      ? document.getElementById("regle-categorie").value
+      : "";
   // Même règle pour le compte en face : seul un virement en porte un.
   const compteAutreVal =
     type === "virement" ? document.getElementById("regle-compte-autre").value : "";
 
   const payload = {
     nom,
+    description: document.getElementById("regle-description").value.trim(),
     conditions: {
       operateur: document.getElementById("regle-connecteur").value,
       groupes: regleBrouillonGroupes,
     },
     type_id: idTypeOperation(type),
     categorie_id: categorieVal ? Number(categorieVal) : null,
+    decoupes,
     compte_autre_id: compteAutreVal ? Number(compteAutreVal) : null,
     actif: document.getElementById("regle-actif").checked,
     arreter_apres: document.getElementById("regle-arreter-apres").checked,
@@ -628,6 +908,7 @@ function carteGalerie(regle, rang) {
       <span class="regle-vignette-nom">${escapeHtml(regle.nom)}</span>
       ${regle.actif ? "" : `<span class="badge-aucun">${t("inactive")}</span>`}
     </div>
+    ${descriptionRegleHtml(regle)}
     <div class="regle-carte-conditions">${t("Si")} ${resumeRegle(regle)}</div>
     <div class="regle-carte-action">→ ${actionRegleHtml(regle)}</div>
     ${badgeChainageHtml(regle)}

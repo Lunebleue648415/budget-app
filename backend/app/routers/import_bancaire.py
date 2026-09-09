@@ -346,12 +346,19 @@ async def previsualiser(
     compte_id_defaut: Optional[int] = Form(None),
     delimiteur: Optional[str] = Form(None),
     separateur_decimal: Optional[str] = Form(None),
+    colonnes: Optional[str] = Form(None),
     db: Session = Depends(get_db),
 ):
+    """`colonnes` : les colonnes que l'ÉCRAN affiche, en JSON, quand elles ne
+    sont pas encore celles du preset — on vient de déplacer un en-tête ou de
+    corriger un numéro, et on veut voir ce que ça donne avant d'enregistrer.
+    Absent, le preset décide, comme avant. Rien n'est écrit dans les deux cas :
+    c'est `PUT /presets/{id}` qui enregistre, et lui seul."""
     _get_preset_ou_404(db, preset_id)
     delimiteur = _valider_delimiteur(delimiteur)
     separateur_decimal = _valider_separateur_decimal(separateur_decimal)
     contenu = await fichier.read()
+    colonnes_lues = _valider_colonnes_essai(colonnes)
     try:
         return import_bancaire.previsualiser(
             db,
@@ -360,9 +367,34 @@ async def previsualiser(
             compte_id_defaut=compte_id_defaut,
             delimiteur=delimiteur,
             separateur_decimal=separateur_decimal,
+            colonnes=colonnes_lues,
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Fichier illisible : {exc}")
+
+
+def _valider_colonnes_essai(colonnes: Optional[str]):
+    """Les colonnes d'un essai de lecture, ou None si la requête n'en donne pas.
+
+    VALIDÉES PAR LE MÊME SCHÉMA QUE CELLES DU PRESET : un essai qui lirait deux
+    fois la même propriété, ou une propriété inconnue, produirait un aperçu que
+    l'enregistrement refuserait ensuite — on aurait montré un import impossible.
+    """
+    if colonnes is None:
+        return None
+    try:
+        modele = schemas.ColonnesImportEssai.model_validate_json(colonnes)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"colonnes invalides : {exc}")
+    # LES MÊMES CONTRÔLES QUE POUR UN PRESET, à ceci près qu'on n'exige PAS les
+    # propriétés obligatoires : un essai passe par des états incomplets — on
+    # vient de sortir « Montant » d'une colonne pour le poser ailleurs — et
+    # refuser de lire le fichier à ce moment-là priverait justement du retour
+    # qu'on est en train de chercher. Ce qui est vraiment interdit, ce sont les
+    # configurations qui n'ont pas de sens : deux fois la même propriété, deux
+    # propriétés sur la même colonne, une propriété qui n'existe pas.
+    valider_colonnes(modele.colonnes, PROPRIETES_IMPORT_VALIDES, set())
+    return [c.model_dump() for c in modele.colonnes]
 
 
 @router.post("/presets/{preset_id}/confirmer", response_model=schemas.ImportResultat)
@@ -373,12 +405,18 @@ async def confirmer(
     compte_id_defaut: Optional[int] = Form(None),
     delimiteur: Optional[str] = Form(None),
     separateur_decimal: Optional[str] = Form(None),
+    colonnes: Optional[str] = Form(None),
     db: Session = Depends(get_db),
 ):
+    """`colonnes` : LES MÊMES que celles de l'aperçu qu'on confirme. L'écran les
+    envoie systématiquement, et c'est ce qui garantit qu'on importe ce qu'on
+    vient de relire — y compris quand l'arrangement n'est pas encore enregistré
+    dans le preset. Rien n'est écrit sur le preset ici non plus."""
     _get_preset_ou_404(db, preset_id)
     delimiteur = _valider_delimiteur(delimiteur)
     separateur_decimal = _valider_separateur_decimal(separateur_decimal)
     contenu = await fichier.read()
+    colonnes_lues = _valider_colonnes_essai(colonnes)
     try:
         overrides = schemas.ImportMappingOverrides.model_validate_json(mappings)
     except Exception:
@@ -393,6 +431,7 @@ async def confirmer(
             compte_id_defaut=compte_id_defaut,
             delimiteur=delimiteur,
             separateur_decimal=separateur_decimal,
+            colonnes=colonnes_lues,
         )
     except import_bancaire.ImportBloque as exc:
         # Le fichier est parfaitement lisible : c'est la configuration du preset

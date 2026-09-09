@@ -64,19 +64,41 @@ def _preparer_import_backend() -> None:
         sys.path.insert(0, str(_racine_ressources()))
 
 
-def _appliquer_migrations() -> None:
-    """`alembic upgrade head` par l'API Python plutôt que la ligne de commande.
+def _appliquer_migrations() -> Path | None:
+    """Amène la base au schéma de cette version. Rend le chemin de la copie de
+    sécurité prise avant migration, ou None si rien n'a eu à changer.
 
-    La configuration est construite en mémoire, sans alembic.ini : l'URL de
-    base est de toute façon imposée par `alembic/env.py`, qui la relit depuis
+    `alembic upgrade head` par l'API Python plutôt que la ligne de commande. La
+    configuration est construite en mémoire, sans alembic.ini : l'URL de base
+    est de toute façon imposée par `alembic/env.py`, qui la relit depuis
     `app.database` (donc la même que celle de l'application).
+
+    UNE COPIE EST PRISE AVANT DE TOUCHER À UNE BASE QUI EXISTE DÉJÀ. Ce
+    démarrage-ci ne migre plus une base de test jetable posée à côté de
+    l'exécutable : depuis que l'emplacement est choisi par l'utilisateur (cf.
+    app/database.py), il migre SA base, celle qu'il a rangée dans ses
+    documents. Une migration réussie ne perd rien — mais c'est précisément le
+    moment où l'on regrette de ne pas avoir de copie, puisque le schéma change
+    sous des données qu'on ne peut pas reconstituer.
+
+    UNE BASE QUI N'EXISTE PAS ENCORE passe au contraire par l'`upgrade` nu :
+    il n'y a rien à sauvegarder, et c'est lui qui CRÉE le fichier, y pose le
+    schéma et son contenu initial. C'est le tout premier lancement.
     """
     from alembic import command
     from alembic.config import Config
 
+    from app import database
+
+    cible = database.DATABASE_PATH
+    if cible.is_file() and database.revision_actuelle(cible) is not None:
+        sauvegarde, _revision_quittee = database.migrer_si_necessaire(cible)
+        return sauvegarde
+
     config = Config()
     config.set_main_option("script_location", str(_racine_ressources() / "alembic"))
     command.upgrade(config, "head")
+    return None
 
 
 def _socket_local() -> tuple[socket.socket, int]:
@@ -150,6 +172,73 @@ def _signaler_erreur(message: str) -> None:
         print(message, file=sys.stderr)
 
 
+class ApiBureau:
+    """Le peu de NATIF que la page ne peut pas faire seule, exposé au JavaScript.
+
+    POURQUOI ÇA EXISTE. Un navigateur ne donne JAMAIS le chemin complet d'un
+    fichier choisi par l'utilisateur — c'est une limite de sécurité, pas un
+    oubli : `<input type="file">` ne rend qu'un nom. Or l'application demande
+    précisément un chemin complet, et le seul écran qui le demande est celui du
+    premier démarrage, devant quelqu'un qui vient d'installer l'application et
+    n'a aucune raison de savoir écrire `C:\\Users\\...\\Documents\\...` à la
+    main. La fenêtre de bureau, elle, peut ouvrir le sélecteur du SYSTÈME.
+
+    pywebview expose ces méthodes sous `window.pywebview.api.<nom>`, en
+    promesses. Elles n'existent QUE dans l'application de bureau : ouvert dans
+    un navigateur pendant le développement, `window.pywebview` est absent, et
+    l'écran retombe sur la saisie à la main (cf. app.js).
+    """
+
+    def choisir_emplacement_base(self, chemin_propose: str = "") -> str | None:
+        """Sélecteur « enregistrer sous » : il accepte un fichier qui n'existe
+        pas encore, ce qui est le cas normal ici — on choisit OÙ RANGER une base
+        qui sera créée ou déplacée là. Un sélecteur d'ouverture ne saurait
+        désigner que des fichiers déjà présents.
+
+        Rend None quand l'utilisateur annule ; l'écran laisse alors le champ
+        tel quel plutôt que de l'effacer."""
+        return self._dialogue("enregistrer", chemin_propose)
+
+    def choisir_base_existante(self, chemin_propose: str = "") -> str | None:
+        """Sélecteur d'ouverture, pour le panneau des Paramètres : là, on
+        rejoint une base qui existe déjà (celle qu'on retrouve après une mise à
+        jour, celle d'un disque externe)."""
+        return self._dialogue(
+            "ouvrir",
+            chemin_propose,
+            file_types=("Base de données (*.db;*.sqlite;*.sqlite3)", "Tous les fichiers (*.*)"),
+        )
+
+    def _dialogue(self, mode: str, chemin_propose: str, file_types=()) -> str | None:
+        # Importé ICI et pas en tête de module : `webview` tire les
+        # bibliothèques graphiques du système, et tout ce qui précède
+        # l'ouverture de la fenêtre (migrations, serveur) doit pouvoir tourner
+        # sans elles — c'est la règle que suit déjà `main()`.
+        import webview
+
+        depart = Path(chemin_propose) if chemin_propose else None
+        try:
+            resultat = webview.windows[0].create_file_dialog(
+                webview.SAVE_DIALOG if mode == "enregistrer" else webview.OPEN_DIALOG,
+                # Le dossier proposé, pour ouvrir le sélecteur AU BON ENDROIT
+                # plutôt qu'à la racine du disque. Seulement s'il existe : un
+                # dossier inventé y ferait échouer l'ouverture sur certaines
+                # plateformes.
+                directory=str(depart.parent) if depart and depart.parent.is_dir() else "",
+                save_filename=depart.name if depart else "",
+                file_types=file_types,
+            )
+        except Exception:
+            # Un sélecteur qui ne s'ouvre pas ne doit pas casser l'écran : la
+            # saisie à la main reste possible, et c'était le seul chemin avant.
+            return None
+        if not resultat:
+            return None
+        # SAVE_DIALOG rend une chaîne, les autres une séquence : les deux
+        # existent selon la plateforme et la version, on ne parie pas.
+        return resultat if isinstance(resultat, str) else resultat[0]
+
+
 def main() -> int:
     platforms.identite_application()
     _preparer_import_backend()
@@ -183,8 +272,18 @@ def main() -> int:
     # d'opération ou un nom de titre — alors que la même page, ouverte dans un
     # navigateur pendant le développement, se sélectionne normalement. C'est la
     # raison pour laquelle le problème ne se voit QUE dans l'app packagée.
+    # `js_api` : le sélecteur de fichiers du SYSTÈME, exposé à la page sous
+    # `window.pywebview.api` (cf. ApiBureau). Sans lui, l'écran de premier
+    # démarrage n'aurait que la saisie du chemin à la main — un navigateur ne
+    # donne jamais le chemin complet d'un fichier choisi.
     webview.create_window(
-        TITRE, url, width=1280, height=860, min_size=(900, 600), text_select=True
+        TITRE,
+        url,
+        width=1280,
+        height=860,
+        min_size=(900, 600),
+        text_select=True,
+        js_api=ApiBureau(),
     )
     webview.start()
     return 0

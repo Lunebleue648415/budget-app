@@ -501,14 +501,131 @@ async function appliquerAgregation(annee, mois) {
   // vue par monnaie doivent se ressembler jusqu'au pixel, et deux rendus
   // parallèles finiraient par ne plus le faire.
   renderKpisDashboard(reponse.dashboard.kpis[0]);
-  renderRepartitionComptes(
-    reponse.dashboard.comptes,
-    state.dashboardMonnaieId,
-    // Déjà convertie par le serveur, comme le reste des KPI.
-    reponse.dashboard.kpis[0].valorisation_placements
-  );
   return true;
 }
+
+/* ---------- La même case, pour le camembert de la Vue globale des comptes ----------
+ *
+ * LE CAMEMBERT A SA PROPRE MONNAIE, et donc sa propre case. Il vivait sur le
+ * dashboard, où la case des onglets suffisait à le convertir avec le reste ;
+ * depuis qu'il est sur la page des comptes, il choisit sa monnaie dans un menu
+ * à lui, sur une page qui n'a pas d'onglets de monnaie du tout. Il lui faut
+ * donc sa bascule, posée dans le conteneur que cette page réserve aux
+ * extensions (`#globale-repartition-options`).
+ *
+ * DEUX ÉTATS INDÉPENDANTS (`agregationActive` pour le dashboard,
+ * `avoirsAgreges` ici) : ce sont deux écrans qu'on ne regarde pas ensemble, et
+ * partager la case aurait fait qu'ouvrir l'un change silencieusement l'autre.
+ *
+ * MÊME ROUTE, MÊME FONCTION DE RENDU que la vue par monnaie : le camembert
+ * converti et le camembert d'une monnaie doivent se ressembler jusqu'au pixel.
+ */
+
+let avoirsAgreges = false;
+let avoirsNonConvertis = [];
+
+function poserBasculeAvoirs() {
+  const ancre = document.getElementById("globale-repartition-options");
+  if (!ancre) return;
+  let bloc = document.getElementById("monnaies-avoirs-agregation");
+  if (!agregationDisponible()) {
+    if (bloc) bloc.remove();
+    avoirsAgreges = false;
+    return;
+  }
+  if (!bloc) {
+    bloc = document.createElement("div");
+    bloc.id = "monnaies-avoirs-agregation";
+    bloc.className = "monnaies-agregation";
+    bloc.innerHTML = `
+      <label class="import-option-ligne">
+        <input type="checkbox" id="monnaies-avoirs-case" />
+        <span id="monnaies-avoirs-libelle"></span>
+        <i class="info-bulle" tabindex="0" data-info="${escapeHtml(
+          t(
+            "Additionne tes monnaies en une seule, au taux que tu as saisi dans " +
+              "Paramètres → Monnaies. Rien n'est modifié : décoche et tout revient. " +
+              "Une monnaie sans taux est laissée de côté, et signalée."
+          )
+        )}">i</i>
+      </label>
+      <div class="hint" id="monnaies-avoirs-alerte" style="display:none"></div>
+    `;
+    ancre.appendChild(bloc);
+    document.getElementById("monnaies-avoirs-case").addEventListener("change", (e) => {
+      avoirsAgreges = e.target.checked;
+      renderRepartitionAvoirs();
+    });
+  }
+  document.getElementById("monnaies-avoirs-case").checked = avoirsAgreges;
+  const monnaie = monnaieParId(state.comptesRepartitionMonnaieId);
+  document.getElementById("monnaies-avoirs-libelle").textContent = monnaie
+    ? t("Tout convertir en {monnaie}", { monnaie: monnaie.nom })
+    : t("Tout convertir");
+  majAlerteAvoirs();
+}
+
+function majAlerteAvoirs() {
+  const alerte = document.getElementById("monnaies-avoirs-alerte");
+  if (!alerte) return;
+  if (!avoirsAgreges || avoirsNonConvertis.length === 0) {
+    alerte.style.display = "none";
+    return;
+  }
+  alerte.style.display = "";
+  alerte.textContent = t(
+    "Pas de taux pour {monnaies} : ces montants ne sont pas comptés. Saisis leur taux dans Paramètres → Monnaies.",
+    { monnaies: avoirsNonConvertis.map((m) => m.monnaie_nom).join(", ") }
+  );
+}
+
+/**
+ * Redessine le camembert converti, par-dessus celui que le noyau vient de
+ * rendre par monnaie.
+ *
+ * LA PÉRIODE EST CELLE PAR DÉFAUT DU SERVEUR (le mois courant), comme pour le
+ * `/dashboard` que cette page demande déjà : le camembert ne lit que des soldes
+ * RÉELS et la valorisation des titres, et ni l'un ni l'autre ne dépend du mois
+ * qu'on regarderait.
+ */
+async function appliquerAgregationAvoirs() {
+  const parametres = new URLSearchParams({
+    vers: String(state.comptesRepartitionMonnaieId),
+  });
+  const reponse = await apiFetch(`/conversion/dashboard?${parametres}`);
+  avoirsNonConvertis = reponse.non_converties || [];
+  if (!reponse.dashboard) return;
+  renderRepartitionComptes(
+    reponse.dashboard.comptes,
+    state.comptesRepartitionMonnaieId,
+    // Déjà convertie par le serveur, comme le reste des chiffres.
+    reponse.dashboard.kpis[0].valorisation_placements
+  );
+}
+
+// On enveloppe le rendu du camembert du noyau, et non le chargeur de la page :
+// changer de monnaie dans le menu passe par lui sans recharger quoi que ce
+// soit, et la vue convertie doit suivre ce geste-là aussi.
+const renderRepartitionAvoirsAvantGreffe = window.renderRepartitionAvoirs;
+window.renderRepartitionAvoirs = function () {
+  renderRepartitionAvoirsAvantGreffe();
+  poserBasculeAvoirs();
+  if (!avoirsAgreges || !agregationDisponible()) {
+    avoirsNonConvertis = [];
+    majAlerteAvoirs();
+    return;
+  }
+  appliquerAgregationAvoirs()
+    .catch((err) => {
+      // La vue par monnaie est déjà à l'écran : on la laisse, et on dit
+      // pourquoi la conversion n'a pas eu lieu.
+      showMessage(err.message, "error");
+      avoirsAgreges = false;
+      const case_ = document.getElementById("monnaies-avoirs-case");
+      if (case_) case_.checked = false;
+    })
+    .finally(majAlerteAvoirs);
+};
 
 const loadDashboardDataAvantGreffe = window.loadDashboardData;
 window.loadDashboardData = async function (annee, mois) {

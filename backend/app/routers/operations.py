@@ -181,6 +181,24 @@ def _valider_operations_remboursees(
             )
 
 
+def _valider_decoupes(db: Session, code: str, montant: float, decoupes) -> None:
+    """Refuse en 400 une découpe que la base ne doit pas voir.
+
+    Deux contrôles, et ils ne se font pas au même endroit : la FORME (au moins
+    deux parts, pas de doublon de catégorie, somme égale au montant, type
+    `classique`) est jugée par `crud.erreur_decoupes`, partagée avec le dernier
+    filet des appels internes ; l'EXISTENCE des catégories visées demande la
+    base, et ne peut donc se vérifier qu'ici.
+    """
+    if not decoupes:
+        return
+    erreur = crud.erreur_decoupes(code, montant, decoupes)
+    if erreur:
+        raise HTTPException(status_code=400, detail=erreur)
+    for part in decoupes:
+        _valider_categorie(db, part.categorie_id)
+
+
 def _valider_amortissement(
     db_operation: models.Operation, updates: schemas.OperationUpdate
 ) -> None:
@@ -249,6 +267,11 @@ def list_operations(
     # borner que d'un côté (« au moins 500 € », « au plus 20 € »).
     montant_min: Optional[float] = None,
     montant_max: Optional[float] = None,
+    # UN VIREMENT EST INDIVISIBLE : avec ce drapeau, une jambe retenue par les
+    # filtres ramène l'autre, même si celle-ci ne les respecte pas (cf.
+    # crud.get_operations). L'écran Opérations le pose, parce qu'il affiche les
+    # virements par paire ; les autres lecteurs de cette route ne le posent pas.
+    paires_virement: bool = False,
     db: Session = Depends(get_db),
 ):
     # Topping-up paresseux des occurrences récurrentes avant toute lecture
@@ -264,6 +287,7 @@ def list_operations(
         date_fin=date_fin,
         montant_min=montant_min,
         montant_max=montant_max,
+        paires_virement=paires_virement,
     )
     return [_build_operation_read(db, op) for op in operations]
 
@@ -311,6 +335,9 @@ def create_operation(operation: schemas.OperationCreate, db: Session = Depends(g
     erreur = crud.erreur_montant_du(code, operation.montant, operation.montant_du)
     if erreur:
         raise HTTPException(status_code=400, detail=erreur)
+
+    # Même raison pour la découpe : sa validité dépend du type et du montant.
+    _valider_decoupes(db, code, operation.montant, operation.decoupes)
 
     db_operation = crud.create_operation(db, operation)
     return _build_operation_read(db, db_operation)
@@ -399,6 +426,18 @@ def update_operation(
     erreur = crud.erreur_montant_du(code_final, montant, montant_du)
     if erreur:
         raise HTTPException(status_code=400, detail=erreur)
+
+    # LA DÉCOUPE, ELLE AUSSI SUR L'ÉTAT FINAL. Changer le seul montant d'une
+    # opération déjà découpée romprait l'égalité « somme des parts = montant » :
+    # c'est refusé plutôt que rattrapé, parce qu'il n'existe aucune façon
+    # honnête de décider quelle part encaisse la différence. Renvoyer les parts
+    # avec le nouveau montant est le chemin, et c'est ce que fait l'écran.
+    _valider_decoupes(
+        db,
+        code_final,
+        montant,
+        updates.decoupes if updates.decoupes is not None else db_operation.decoupes,
+    )
     if montant_a_rembourser > montant_du:
         raise HTTPException(
             status_code=400, detail="montant_a_rembourser ne peut pas dépasser montant_du"

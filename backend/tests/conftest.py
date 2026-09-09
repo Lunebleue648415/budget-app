@@ -133,9 +133,9 @@ def charger_module_extension(extension_id: str, nom_fichier: str):
     (cf. app/extensions.py::charger_routeur). Ce raccourci évite à chaque test
     de refaire cette plomberie.
 
-    Cherche dans `extensions/` puis `extensions-dev/` : un test qui vise une
-    extension de développement (« base-de-donnees ») la trouve donc aussi,
-    sans avoir à dire où elle vit.
+    Cherche dans `extensions/` puis `extensions-dev/` : un test qui vise
+    l'extension de développement (« outils-dev ») la trouve donc aussi, sans
+    avoir à dire où elle vit.
     """
     import importlib.util
     import sys

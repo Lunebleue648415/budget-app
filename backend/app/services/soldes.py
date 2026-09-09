@@ -220,10 +220,76 @@ def calculer_totaux_par_monnaie(
     return totaux
 
 
-def _filtre_periode(annee: int, mois: Optional[int]):
+# ---------- Le mois découpé en semaines ----------
+#
+# UNE SEMAINE VA DU LUNDI AU DIMANCHE, celle du calendrier — c'est la seule qui
+# corresponde à quelque chose de vécu. « La semaine du 6 » se retrouve sur un
+# relevé ; « le deuxième bloc de sept jours du mois » ne se retrouve nulle part.
+#
+# ELLE EST COUPÉE AUX BORDS DU MOIS : la première commence au 1er (donc courte
+# si le 1er n'est pas un lundi), la dernière finit au dernier jour (donc courte
+# si le mois ne finit pas un dimanche). Les semaines PARTITIONNENT ainsi le mois
+# exactement, ce qui est ce dont tout le reste dépend : la somme des semaines
+# vaut la barre du mois, et ce qui est posé sur le mois sans avoir de jour —
+# part amortie, budget d'une catégorie — se répartit au prorata des jours.
+#
+# Une semaine à cheval sur deux mois est donc lue deux fois, une part de chaque
+# côté. C'est voulu : on regarde un mois, pas une semaine flottante.
+JOURS_PAR_SEMAINE = 7
+
+
+def semaines_du_mois(annee: int, mois: int) -> list[tuple[int, int]]:
+    """Les bornes (premier jour, dernier jour) de chaque semaine du mois.
+
+    Quatre à six blocs selon le calendrier : du 1er au premier dimanche, puis
+    des lundis aux dimanches, puis du dernier lundi à la fin du mois."""
+    dernier = calendar.monthrange(annee, mois)[1]
+    bornes = []
+    debut = 1
+    while debut <= dernier:
+        # `weekday()` : lundi = 0 … dimanche = 6. Ce qui reste jusqu'au
+        # dimanche vaut donc 6 − weekday, et zéro si on y est déjà.
+        jour = date_type(annee, mois, debut)
+        fin = min(debut + (6 - jour.weekday()), dernier)
+        bornes.append((debut, fin))
+        debut = fin + 1
+    return bornes
+
+
+def _bornes_semaine(annee: int, mois: int, semaine: int) -> tuple[date_type, date_type]:
+    """Les deux dates d'une semaine, par son rang (1 pour la première)."""
+    debut, fin = semaines_du_mois(annee, mois)[semaine - 1]
+    return date_type(annee, mois, debut), date_type(annee, mois, fin)
+
+
+def prorata_semaine(annee: int, mois: Optional[int], semaine: Optional[int]) -> float:
+    """La part du mois que cette semaine représente, en JOURS (1.0 hors vue
+    semaine).
+
+    CE QUE CE COEFFICIENT SERT À ÉTALER : ce qui est posé sur le MOIS et non sur
+    une date — la part d'une dépense amortie, et le budget d'une catégorie. Ni
+    l'une ni l'autre n'a de jour dans le mois : une facture étalée sur douze
+    mois pèse sur tout le mois, pas sur le 3. La répartir au prorata des jours
+    est la seule façon de la faire compter sans inventer une date, et c'est ce
+    qui garantit que la somme des semaines vaut toujours le mois.
+
+    Une dépense DATÉE, elle, n'est jamais prorata­tisée : elle tombe dans la
+    semaine de sa date, entière."""
+    if mois is None or semaine is None:
+        return 1.0
+    debut, fin = _bornes_semaine(annee, mois, semaine)
+    return (fin.day - debut.day + 1) / calendar.monthrange(annee, mois)[1]
+
+
+def _filtre_periode(annee: int, mois: Optional[int], semaine: Optional[int] = None):
     """mois=None : agrège sur toute l'année plutôt qu'un mois précis (vue
     annuelle du dashboard) — même colonne de date, seul le format strftime
     change (comparaison sur l'année seule).
+
+    `semaine` (1 pour la première du mois) restreint en plus à la semaine
+    correspondante : c'est le seul ajout de la vue semaine, et il ne concerne
+    que les opérations DATÉES — cf. prorata_semaine pour ce qui est posé sur le
+    mois entier.
 
     LES OPÉRATIONS AMORTIES SONT EXCLUES ICI, et c'est le point : pour elles, la
     date ne dit plus QUAND la dépense pèse, seulement quand l'argent est sorti.
@@ -233,13 +299,27 @@ def _filtre_periode(annee: int, mois: Optional[int]):
     dans ce filtre plutôt qu'à chaque appel : les deux agrégats de période
     (histogramme par catégorie, flux entrées/sorties) doivent l'appliquer, et
     aucun futur appelant n'a de raison de vouloir l'inverse."""
+    return and_(
+        models.Operation.amorti.is_(False), filtre_date_periode(annee, mois, semaine)
+    )
+
+
+def filtre_date_periode(
+    annee: int, mois: Optional[int], semaine: Optional[int] = None
+):
+    """La seule contrainte de DATE de la période, sans l'exclusion des opérations
+    amorties que `_filtre_periode` y ajoute.
+
+    Séparé parce qu'un calcul en a besoin nu : la VARIATION BRUTE compte une
+    dépense amortie au mois où l'argent est sorti, pour son montant entier (cf.
+    get_variation_brute). Tous les autres agrégats de période veulent l'exclusion
+    et passent donc par `_filtre_periode`."""
     if mois is None:
-        filtre_date = func.strftime("%Y", models.Operation.date) == f"{annee:04d}"
-    else:
-        filtre_date = (
-            func.strftime("%Y-%m", models.Operation.date) == f"{annee:04d}-{mois:02d}"
-        )
-    return and_(models.Operation.amorti.is_(False), filtre_date)
+        return func.strftime("%Y", models.Operation.date) == f"{annee:04d}"
+    if semaine is None:
+        return func.strftime("%Y-%m", models.Operation.date) == f"{annee:04d}-{mois:02d}"
+    debut, fin = _bornes_semaine(annee, mois, semaine)
+    return and_(models.Operation.date >= debut, models.Operation.date <= fin)
 
 
 # ---------- Amortissement sur plusieurs mois ----------
@@ -313,8 +393,111 @@ def part_amortie(operation: models.Operation, annee: int, mois: Optional[int]) -
     return mois_couverts / nb_mois
 
 
+# UNE OPÉRATION DÉCOUPÉE N'A PAS DE CATÉGORIE, et c'est ce qui rend tout ce
+# fichier juste sans le réécrire : `categorie_id` passe à NULL dès qu'elle porte
+# des parts (cf. models.OperationDecoupe), donc les quatre jointures internes
+# sur `categorie` ci-dessous l'écartent d'elles-mêmes. Il ne restait qu'à
+# AJOUTER ce que ses parts apportent — d'où les trois fonctions qui suivent,
+# chacune le pendant exact d'une agrégation existante.
+#
+# Rien à faire du côté des FLUX (cf. get_flux_periode) ni des SOLDES : ils
+# somment `Operation.montant` sans jamais passer par la catégorie, et la somme
+# des parts vaut ce montant. C'est précisément l'intérêt du garde-fou : sans
+# lui, l'histogramme et le total des sorties posé juste au-dessus auraient
+# cessé de tomber d'accord.
+#
+# LA BASE IMPOSABLE D'UNE PART EST SON MONTANT, sans exception. Seul le type
+# `classique` se découpe (cf. crud.erreur_decoupes), et c'est justement celui
+# pour lequel _base_imposable rend le montant tel quel : il n'y a donc aucun
+# `montant_du` à répartir entre les parts, et pas de second cas à tenir
+# d'accord avec le premier.
+
+
+def _sommes_decoupes_par_categorie(
+    db: Session,
+    annee: int,
+    mois: Optional[int],
+    statut: Statut,
+    monnaie_id: int,
+    semaine: Optional[int] = None,
+) -> dict:
+    """Ce que les PARTS des opérations découpées non amorties apportent à la
+    période, par catégorie."""
+    lignes = (
+        db.query(
+            models.Categorie.nom,
+            func.sum(models.OperationDecoupe.montant).label("total"),
+        )
+        .join(
+            models.Operation,
+            models.OperationDecoupe.operation_id == models.Operation.id,
+        )
+        .join(
+            models.Categorie,
+            models.OperationDecoupe.categorie_id == models.Categorie.id,
+        )
+        .filter(
+            models.Operation.sens == Sens.depense,
+            models.Operation.statut == statut,
+            models.Operation.monnaie_id == monnaie_id,
+            _filtre_periode(annee, mois, semaine),
+        )
+        .group_by(models.Categorie.nom)
+        .all()
+    )
+    return {nom: total or 0.0 for nom, total in lignes}
+
+
+def _sommes_decoupes_amorties_par_categorie(
+    db: Session,
+    annee: int,
+    mois: Optional[int],
+    statut: Statut,
+    monnaie_id: int,
+    semaine: Optional[int] = None,
+) -> dict:
+    """Le pendant amorti du précédent : chaque part ne compte que pour la
+    fraction de l'amortissement qui tombe dans la période.
+
+    L'AMORTISSEMENT PORTE SUR L'OPÉRATION, PAS SUR LA PART : une facture étalée
+    sur douze mois l'est en entier, et chacune de ses parts suit le même
+    calendrier. Il n'y a donc rien à décider ici — la même `part_amortie`
+    s'applique à chaque part."""
+    lignes = (
+        db.query(models.Categorie.nom, models.OperationDecoupe.montant, models.Operation)
+        .join(
+            models.Operation,
+            models.OperationDecoupe.operation_id == models.Operation.id,
+        )
+        .join(
+            models.Categorie,
+            models.OperationDecoupe.categorie_id == models.Categorie.id,
+        )
+        .filter(
+            models.Operation.sens == Sens.depense,
+            models.Operation.statut == statut,
+            models.Operation.monnaie_id == monnaie_id,
+            _filtre_periode_amortie(annee, mois),
+        )
+        .all()
+    )
+    totaux: dict = {}
+    prorata = prorata_semaine(annee, mois, semaine)
+    for nom, montant, operation in lignes:
+        totaux[nom] = (
+            totaux.get(nom, 0.0)
+            + montant * part_amortie(operation, annee, mois) * prorata
+        )
+    return totaux
+
+
 def _sommes_par_categorie(
-    db: Session, annee: int, mois: Optional[int], statut: Statut, monnaie_id: int
+    db: Session,
+    annee: int,
+    mois: Optional[int],
+    statut: Statut,
+    monnaie_id: int,
+    semaine: Optional[int] = None,
 ) -> dict:
     """Pour une période (mois précis, ou année entière si mois=None), un statut
     et une monnaie donnés : somme des opérations classiques + somme (montant -
@@ -323,7 +506,7 @@ def _sommes_par_categorie(
         models.Operation.sens == Sens.depense,
         models.Operation.statut == statut,
         models.Operation.monnaie_id == monnaie_id,
-        _filtre_periode(annee, mois),
+        _filtre_periode(annee, mois, semaine),
     ]
 
     classiques = (
@@ -352,14 +535,30 @@ def _sommes_par_categorie(
     for nom, total in remboursables:
         totaux[nom] = totaux.get(nom, 0.0) + (total or 0.0)
     for nom, total in _sommes_amorties_par_categorie(
-        db, annee, mois, statut, monnaie_id
+        db, annee, mois, statut, monnaie_id, semaine
     ).items():
         totaux[nom] = totaux.get(nom, 0.0) + total
+    # Les opérations DÉCOUPÉES, que les deux requêtes ci-dessus n'ont pas vues :
+    # leur `categorie_id` est NULL, la jointure interne sur `categorie` les
+    # écarte (cf. le commentaire au-dessus de _sommes_decoupes_par_categorie).
+    for source in (
+        _sommes_decoupes_par_categorie(db, annee, mois, statut, monnaie_id, semaine),
+        _sommes_decoupes_amorties_par_categorie(
+            db, annee, mois, statut, monnaie_id, semaine
+        ),
+    ):
+        for nom, total in source.items():
+            totaux[nom] = totaux.get(nom, 0.0) + total
     return totaux
 
 
 def _sommes_amorties_par_categorie(
-    db: Session, annee: int, mois: Optional[int], statut: Statut, monnaie_id: int
+    db: Session,
+    annee: int,
+    mois: Optional[int],
+    statut: Statut,
+    monnaie_id: int,
+    semaine: Optional[int] = None,
 ) -> dict:
     """Ce que les opérations AMORTIES apportent à la période, par catégorie —
     le complément de _sommes_par_categorie, qui les exclut (cf. _filtre_periode).
@@ -383,12 +582,16 @@ def _sommes_amorties_par_categorie(
     )
 
     totaux: dict = {}
+    prorata = prorata_semaine(annee, mois, semaine)
     for nom, operation, code in lignes:
         # Même base imposable que pour les non amorties (cf. _base_imposable) :
         # le montant, sauf pour une dépense remboursable, dont seule la part
         # restant à ma charge est une dépense.
         base = _base_imposable(operation.montant, operation.montant_du, code)
-        totaux[nom] = totaux.get(nom, 0.0) + base * part_amortie(operation, annee, mois)
+        totaux[nom] = (
+            totaux.get(nom, 0.0)
+            + base * part_amortie(operation, annee, mois) * prorata
+        )
     return totaux
 
 
@@ -438,7 +641,11 @@ def _fondre_par_libelle(cumuls: dict, categorie: str, nature: str, montant: floa
 
 
 def _top_depenses_par_categorie(
-    db: Session, annee: int, mois: Optional[int], monnaie_id: int
+    db: Session,
+    annee: int,
+    mois: Optional[int],
+    monnaie_id: int,
+    semaine: Optional[int] = None,
 ) -> dict[str, list[dict]]:
     """Les plus grosses dépenses de la période, par catégorie et fondues par
     libellé — ce que montre l'infobulle d'une barre de l'histogramme.
@@ -481,8 +688,9 @@ def _top_depenses_par_categorie(
         )
 
     cumuls: dict = {}
+    prorata = prorata_semaine(annee, mois, semaine)
     for categorie, nature, montant, montant_du, code in requete(
-        _filtre_periode(annee, mois)
+        _filtre_periode(annee, mois, semaine)
     ).all():
         _fondre_par_libelle(
             cumuls, categorie, nature, _base_imposable(montant, montant_du, code)
@@ -498,10 +706,40 @@ def _top_depenses_par_categorie(
         .all()
     )
     for categorie, operation, code in amorties:
-        part = _base_imposable(
-            operation.montant, operation.montant_du, code
-        ) * part_amortie(operation, annee, mois)
+        part = (
+            _base_imposable(operation.montant, operation.montant_du, code)
+            * part_amortie(operation, annee, mois)
+            * prorata
+        )
         _fondre_par_libelle(cumuls, categorie, operation.nature, part)
+
+    # LES PARTS DES OPÉRATIONS DÉCOUPÉES, sous le libellé de leur opération.
+    # Une seule dépense qui se retrouve dans trois barres y apparaît trois fois,
+    # chaque fois pour ce que cette catégorie lui doit : c'est exactement ce que
+    # l'infobulle promet — dire ce qui fait la hauteur de LA barre survolée.
+    for filtre_periode, amortir in (
+        (_filtre_periode(annee, mois, semaine), False),
+        (_filtre_periode_amortie(annee, mois), True),
+    ):
+        lignes_decoupees = (
+            db.query(
+                models.Categorie.nom, models.OperationDecoupe.montant, models.Operation
+            )
+            .join(
+                models.Operation,
+                models.OperationDecoupe.operation_id == models.Operation.id,
+            )
+            .join(
+                models.Categorie,
+                models.OperationDecoupe.categorie_id == models.Categorie.id,
+            )
+            .filter(filtre_periode, *filtre_commun)
+            .all()
+        )
+        for categorie, montant_part, operation in lignes_decoupees:
+            if amortir:
+                montant_part *= part_amortie(operation, annee, mois) * prorata
+            _fondre_par_libelle(cumuls, categorie, operation.nature, montant_part)
 
     resultats: dict[str, list[dict]] = {}
     for categorie, par_libelle in cumuls.items():
@@ -524,13 +762,27 @@ def _top_depenses_par_categorie(
 
 
 def _budget_alloue_periode(
-    db: Session, categorie_id: int, annee: int, mois: Optional[int], monnaie_id: int
+    db: Session,
+    categorie_id: int,
+    annee: int,
+    mois: Optional[int],
+    monnaie_id: int,
+    semaine: Optional[int] = None,
 ) -> float:
     """Budget d'un mois précis, ou somme des 12 mois de l'année si mois=None
     (vue annuelle) — chaque mois résolu par héritage habituel, dans la monnaie
-    demandée (cf. crud.get_budget_categorie)."""
+    demandée (cf. crud.get_budget_categorie).
+
+    EN VUE SEMAINE, LE BUDGET EST DÉCOUPÉ AU PRORATA DES JOURS. Un budget est
+    posé pour un MOIS (cf. models.Categorie) : il n'y a pas d'enveloppe
+    hebdomadaire à lire quelque part. Le trait rouge d'une semaine dit donc « le
+    rythme qu'il faudrait tenir », et non une limite qu'on aurait fixée — c'est
+    la seule lecture qui garde la somme des semaines égale au budget du mois."""
     if mois is not None:
-        return crud.get_budget_categorie(db, categorie_id, annee, mois, monnaie_id)
+        return (
+            crud.get_budget_categorie(db, categorie_id, annee, mois, monnaie_id)
+            * prorata_semaine(annee, mois, semaine)
+        )
     return sum(
         crud.get_budget_categorie(db, categorie_id, annee, m, monnaie_id)
         for m in range(1, 13)
@@ -538,7 +790,11 @@ def _budget_alloue_periode(
 
 
 def get_depenses_par_categorie(
-    db: Session, annee: int, mois: Optional[int], monnaie_id: int
+    db: Session,
+    annee: int,
+    mois: Optional[int],
+    monnaie_id: int,
+    semaine: Optional[int] = None,
 ):
     """Valeur réelle = opérations classiques (réel) + (montant - montant dû)
     des dépenses remboursables (réel), pour la période et la monnaie données.
@@ -572,12 +828,12 @@ def get_depenses_par_categorie(
         .all()
     )
 
-    reel = _sommes_par_categorie(db, annee, mois, Statut.reel, monnaie_id)
+    reel = _sommes_par_categorie(db, annee, mois, Statut.reel, monnaie_id, semaine)
     previsionnel_seul = _sommes_par_categorie(
-        db, annee, mois, Statut.previsionnel, monnaie_id
+        db, annee, mois, Statut.previsionnel, monnaie_id, semaine
     )
     # Calculé une fois pour toutes les catégories, pas une requête par barre.
-    tops = _top_depenses_par_categorie(db, annee, mois, monnaie_id)
+    tops = _top_depenses_par_categorie(db, annee, mois, monnaie_id, semaine)
 
     resultats = []
     for categorie in categories:
@@ -589,17 +845,88 @@ def get_depenses_par_categorie(
                 "total_reel": valeur_reelle,
                 "total_previsionnel": valeur_previsionnelle,
                 "budget_alloue": _budget_alloue_periode(
-                    db, categorie.id, annee, mois, monnaie_id
+                    db, categorie.id, annee, mois, monnaie_id, semaine
                 ),
                 "couleur_index": categorie.couleur_index,
                 "top_depenses": tops.get(categorie.nom, []),
             }
         )
 
-    ligne_prets = _barre_interets_prets(db, annee, mois, monnaie_id)
+    ligne_prets = _barre_interets_prets(db, annee, mois, monnaie_id, semaine)
     if ligne_prets is not None:
         resultats.append(ligne_prets)
     return resultats
+
+
+def get_depenses_par_semaine(db: Session, annee: int, mois: int, monnaie_id: int):
+    """L'histogramme du mois DÉPLIÉ : une liste de dépenses par catégorie pour
+    chaque semaine, plus la moyenne de ces semaines.
+
+    POURQUOI UNE ROUTE À PART, ET PAS UNE `vue="semaine"` DE PLUS SUR LE
+    DASHBOARD. Seul l'histogramme se déplie. Les soldes, le total des avoirs et
+    la répartition des comptes n'ont pas de version hebdomadaire à offrir — un
+    solde ne se découpe pas, il est ce qu'il est à une date. Faire descendre la
+    vue du dashboard entier à la semaine aurait obligé chacun de ces chiffres à
+    répondre à une question qu'on ne lui pose pas.
+
+    LA SOMME DES SEMAINES VAUT LE MOIS, au centime : les semaines partitionnent
+    les jours (cf. semaines_du_mois), et ce qui n'a pas de jour — part amortie,
+    budget — est réparti au prorata des jours (cf. prorata_semaine). C'est le
+    même invariant que celui des découpes d'opération, et pour la même raison :
+    deux chiffres posés l'un à côté de l'autre qui ne s'accordent pas ne passent
+    pas pour une imprécision, mais pour une erreur.
+
+    LA MOYENNE EST CELLE DES SEMAINES AFFICHÉES — leur somme divisée par leur
+    nombre, dernière semaine courte comprise. C'est le seul calcul qu'on puisse
+    vérifier à l'œil sur les barres d'à côté ; normaliser sur sept jours
+    donnerait un chiffre plus juste « par semaine pleine », mais qui ne
+    correspondrait à aucune moyenne des barres qu'on regarde. L'écran dit sur
+    combien de semaines elle porte.
+    """
+    bornes = semaines_du_mois(annee, mois)
+    semaines = [
+        {
+            "numero": rang,
+            "jour_debut": debut,
+            "jour_fin": fin,
+            "depenses": get_depenses_par_categorie(
+                db, annee, mois, monnaie_id, semaine=rang
+            ),
+        }
+        for rang, (debut, fin) in enumerate(bornes, start=1)
+    ]
+
+    # La moyenne, catégorie par catégorie. On repart des lignes déjà calculées
+    # plutôt que d'interroger la base une fois de plus : c'est ce qui garantit
+    # que la barre « Moyenne » est bien la moyenne des barres montrées, et non
+    # un second calcul qui pourrait en différer.
+    nombre = len(semaines) or 1
+    moyenne: dict[str, dict] = {}
+    for semaine in semaines:
+        for ligne in semaine["depenses"]:
+            cumul = moyenne.setdefault(
+                ligne["categorie"],
+                {
+                    "categorie": ligne["categorie"],
+                    "total_reel": 0.0,
+                    "total_previsionnel": 0.0,
+                    "budget_alloue": 0.0,
+                    "couleur_index": ligne["couleur_index"],
+                    # Le détail par libellé n'a pas de sens sur une moyenne : une
+                    # dépense moyenne n'a pas eu lieu. L'infobulle dira
+                    # simplement qu'il n'y a rien à détailler.
+                    "top_depenses": [],
+                },
+            )
+            for champ in ("total_reel", "total_previsionnel", "budget_alloue"):
+                cumul[champ] += ligne[champ] / nombre
+
+    return {
+        "annee": annee,
+        "mois": mois,
+        "semaines": semaines,
+        "moyenne": list(moyenne.values()),
+    }
 
 
 # La couleur de la barre des intérêts. Prise EN FIN de palette (cf. app.js,
@@ -608,7 +935,7 @@ def get_depenses_par_categorie(
 _COULEUR_INTERETS_PRETS = 7
 
 
-def _barre_interets_prets(db: Session, annee, mois, monnaie_id):
+def _barre_interets_prets(db: Session, annee, mois, monnaie_id, semaine=None):
     """La barre « Intérêts de prêts », ou None s'il n'y a rien à montrer.
 
     CE QU'ELLE EST. Pas une catégorie : aucune ligne de `categorie` ne porte ce
@@ -644,7 +971,7 @@ def _barre_interets_prets(db: Session, annee, mois, monnaie_id):
                 models.Operation.monnaie_id == monnaie_id,
                 models.Operation.statut == statut,
                 models.TypeCompte.nom.notin_(TYPES_COMPTE_HORS_COURANT),
-                _filtre_periode(annee, mois),
+                _filtre_periode(annee, mois, semaine),
             )
             .scalar()
         )
@@ -815,6 +1142,55 @@ def get_flux_periode(
     entrees = totaux.get(Sens.entree, 0.0)
     sorties = totaux.get(Sens.depense, 0.0)
     return {"entrees": entrees, "sorties": sorties, "variation": entrees - sorties}
+
+
+def get_variation_brute(
+    db: Session, annee: int, mois: Optional[int], monnaie_id: int
+) -> float:
+    """De combien les comptes courants ont bougé sur la période, SANS RIEN
+    ÉTALER NI RETRANCHER.
+
+    CE QU'ELLE RÉPOND, et que rien d'autre ne répondait : « qu'est-ce qui est
+    passé sur le compte ce mois-ci ». Pas « qu'est-ce que ce mois me coûte » —
+    c'est la question de `get_flux_periode`, et les deux ne se confondent pas :
+
+      - une DÉPENSE AMORTIE compte ici en ENTIER, au mois où l'argent est sorti.
+        L'étalement dit ce qu'elle pèse, pas ce qui a quitté le compte ;
+      - une DÉPENSE REMBOURSABLE compte pour son montant ENTIER, sans retrancher
+        ce qu'on nous rendra. L'argent est parti, même s'il reviendra ;
+      - un PRÊT REÇU compte pour son montant entier, du côté des entrées : cet
+        argent est bien arrivé, même s'il faudra le rendre ;
+      - un RÈGLEMENT (remboursement reçu, remboursement de prêt) compte lui
+        aussi, alors que les flux l'écartent : il solde une dette déjà comptée,
+        mais il déplace bel et bien de l'argent.
+
+    CE QUI RESTE ÉCARTÉ, et pour la même raison que dans les flux : les
+    VIREMENTS INTERNES et les mouvements de titres (`sens IN (entrée, dépense)`
+    ne les retient pas) — déplacer de l'argent entre ses propres comptes ne fait
+    bouger aucun total ; et les comptes d'ÉPARGNE et de PLACEMENTS, pour que ce
+    chiffre reste comparable au « Solde total » posé à côté de lui, qui les
+    exclut déjà.
+
+    RÉEL ET PRÉVISIONNEL CONFONDUS, comme les flux : une opération à venir dans
+    le mois en fait partie.
+    """
+    lignes = (
+        db.query(models.Operation.sens, func.sum(models.Operation.montant))
+        .join(models.Compte, models.Operation.compte_id == models.Compte.id)
+        .join(models.TypeCompte, models.Compte.type_id == models.TypeCompte.id)
+        .filter(
+            # `filtre_date_periode` et non `_filtre_periode` : les opérations
+            # amorties comptent ici, à leur date et pour leur montant entier.
+            filtre_date_periode(annee, mois),
+            models.Operation.monnaie_id == monnaie_id,
+            models.TypeCompte.nom.notin_(TYPES_COMPTE_HORS_COURANT),
+            models.Operation.sens.in_([Sens.entree, Sens.depense]),
+        )
+        .group_by(models.Operation.sens)
+        .all()
+    )
+    totaux = {sens: (total or 0.0) for sens, total in lignes}
+    return totaux.get(Sens.entree, 0.0) - totaux.get(Sens.depense, 0.0)
 
 
 def get_variation_previsionnelle(

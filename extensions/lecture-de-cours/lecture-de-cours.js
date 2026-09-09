@@ -48,6 +48,26 @@ const ID_EXTENSION = "lecture-de-cours";
 // (app.js) : celui-là porte un pictogramme de feuilles, qui annonce « voici une
 // explication ». Ce qui se déplie ici n'est pas un texte mais un réglage, et
 // une flèche vers le bas est le seul dessin qui dise exactement cela.
+/**
+ * LE GLOBE « suivi en ligne », posé à gauche de la flèche de chaque titre.
+ *
+ * EN LIGNE PLUTÔT QUE PAR <img src="/img/connected_to_web.svg">, alors que le
+ * fichier est là et servi : à travers une balise `img`, un SVG est une image
+ * isolée et n'hérite d'aucune couleur de la page (cf. frontend/img/LISEZMOI.md).
+ * Or c'est exactement ce qu'on lui demande — être bleu, de la MÊME teinte que
+ * la flèche d'à côté, et suivre le thème si la palette change. Le dessin est
+ * donc repris ici avec `fill="currentColor"`, comme les pictogrammes du noyau
+ * (ICONE_POUBELLE, ICONE_OEIL…).
+ *
+ * Seul le tracé du globe est repris : le second chemin du fichier n'est qu'un
+ * rectangle transparent de calage, sans objet une fois en ligne.
+ */
+const ICONE_GLOBE = `
+  <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"
+       aria-hidden="true" focusable="false">
+    <path d="M20.501 6.028V6h-.02A10.28 10.28 0 0 0 4.519 6H4.5v.028a10.262 10.262 0 0 0 0 12.944V19h.02a10.28 10.28 0 0 0 15.962 0h.021v-.028a10.262 10.262 0 0 0 0-12.944zM13 6V3.272A4.533 4.533 0 0 1 15.54 6zm2.935 1a16.827 16.827 0 0 1 .853 5H13V7zM12 3.272V6H9.46A4.533 4.533 0 0 1 12 3.272zM12 7v5H8.212a16.827 16.827 0 0 1 .853-5zm-4.787 5H3.226a9.234 9.234 0 0 1 1.792-5h2.984a17.952 17.952 0 0 0-.79 5zm0 1a17.952 17.952 0 0 0 .789 5H5.018a9.234 9.234 0 0 1-1.792-5zm1 0H12v5H9.065a16.827 16.827 0 0 1-.853-5zM12 19v2.728A4.533 4.533 0 0 1 9.46 19zm1 2.728V19h2.54A4.533 4.533 0 0 1 13 21.728zM13 18v-5h3.788a16.827 16.827 0 0 1-.853 5zm4.787-5h3.987a9.234 9.234 0 0 1-1.792 5h-2.984a17.952 17.952 0 0 0 .79-5zm0-1a17.952 17.952 0 0 0-.789-5h2.984a9.234 9.234 0 0 1 1.792 5zm1.352-6h-2.501a8.524 8.524 0 0 0-1.441-2.398A9.306 9.306 0 0 1 19.139 6zM9.803 3.602A8.524 8.524 0 0 0 8.363 6H5.86a9.306 9.306 0 0 1 3.942-2.398zM5.861 19h2.501a8.524 8.524 0 0 0 1.441 2.398A9.306 9.306 0 0 1 5.861 19zm9.336 2.398A8.524 8.524 0 0 0 16.637 19h2.502a9.306 9.306 0 0 1-3.942 2.398z" />
+  </svg>`;
+
 const CHEVRON_BAS = `
   <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
        stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"
@@ -237,118 +257,18 @@ async function poserAideSources() {
   liste.insertAdjacentElement("beforebegin", aide);
 }
 
-/* ---------- Le formulaire « Suivre un cours en ligne » ---------- */
-
-/**
- * Un vrai formulaire de l'app, posé sous « Ajouter un titre ».
+/* ---------- PLUS DE FORMULAIRE « Suivre un cours en ligne » ----------
  *
- * POURQUOI EN PLUS DU CHAMP EN LIGNE. Les deux ne servent pas au même geste :
- * le champ de la rangée CORRIGE le lien d'un titre qu'on est en train de
- * regarder, le formulaire ATTACHE un lien à un titre qu'on vient de créer. Le
- * second se faisait jusqu'ici en allant chercher la bonne rangée dans la liste
- * au-dessus, dans un champ deux fois plus petit que tous les autres champs de
- * l'écran — c'était la seule saisie de l'application qui ne ressemblait à
- * aucune autre.
+ * Il vivait ici, sous « Ajouter un titre » : un menu de titres et un champ
+ * d'URL, pour attacher un lien de cotation à un titre déjà créé.
  *
- * `<form>` sans une ligne de style à lui : la grille, les étiquettes et les
- * champs viennent du noyau (cf. frontend/style.css), et c'est exactement ce
- * qu'on cherchait — il se lit comme « Ajouter un titre », juste au-dessus.
- *
- * Idempotente, et RETIRE le bloc quand l'extension vient d'être décochée :
- * même règle que la barre de mise à jour.
+ * RETIRÉ parce que la flèche de chaque rangée de « Titres suivis » fait la
+ * même chose, en mieux : elle déplie le champ de lien DU titre qu'on regarde,
+ * sans avoir à le rechoisir dans un menu, et le pictogramme posé à sa gauche
+ * dit d'un coup d'œil lesquels sont déjà suivis (cf. greffeLiens). Le
+ * formulaire ne servait plus qu'à refaire, précédé d'une sélection, un geste
+ * déjà accessible juste sous le titre.
  */
-function poserFormulaireLien() {
-  const ancre = document.getElementById("form-action");
-  if (!ancre) return; // extension « placements » absente : rien à greffer
-  const existant = document.getElementById("pw-suivre");
-  if (!actif()) {
-    if (existant) existant.remove();
-    return;
-  }
-
-  if (!existant) {
-    const bloc = document.createElement("div");
-    bloc.id = "pw-suivre";
-    bloc.innerHTML = `
-      <h3>${t("Suivre un cours en ligne")}</h3>
-      <form id="pw-form-lien">
-        <label for="pw-form-lien-titre">${t("Titre")}
-          <select id="pw-form-lien-titre" required></select>
-        </label>
-        <label class="full-width" for="pw-form-lien-url">${t(
-          "Lien de la page de cotation"
-        )}
-          <input type="url" id="pw-form-lien-url" required
-                 placeholder="${t(
-                   "Lien de la page de cotation (Google Finance, Yahoo Finance…)"
-                 )}" />
-        </label>
-        <div class="actions full-width">
-          <button type="submit" class="primary">${t("Enregistrer le lien")}</button>
-        </div>
-      </form>
-    `;
-    ancre.insertAdjacentElement("afterend", bloc);
-    document.getElementById("pw-form-lien").addEventListener("submit", (evenement) => {
-      evenement.preventDefault();
-      suivreTitreChoisi();
-    });
-    // Changer de titre montre le lien qu'il a DÉJÀ : le formulaire sert alors
-    // aussi à le corriger, au lieu d'écraser en aveugle ce qu'on ne voyait pas.
-    document
-      .getElementById("pw-form-lien-titre")
-      .addEventListener("change", majUrlDuTitreChoisi);
-  }
-  remplirMenuTitres();
-}
-
-/** Le menu des titres, rempli depuis la table que le serveur vient de rendre. */
-function remplirMenuTitres() {
-  const select = document.getElementById("pw-form-lien-titre");
-  if (!select) return;
-  const titres = [...coursParTitre.values()];
-  const precedent = select.value;
-  select.innerHTML = titres
-    .map(
-      (titre) =>
-        `<option value="${titre.action_id}">${escapeHtml(titre.action_nom)}${
-          // « (suivi) » plutôt qu'une liste séparée : le formulaire attache un
-          // lien ET en corrige un, et cacher les titres déjà suivis interdirait
-          // le second usage.
-          titre.url_cours ? ` — ${escapeHtml(t("déjà suivi"))}` : ""
-        }</option>`
-    )
-    .join("");
-  if (precedent && titres.some((titre) => String(titre.action_id) === precedent)) {
-    select.value = precedent;
-  }
-  majUrlDuTitreChoisi();
-}
-
-/** Recopie dans le champ le lien du titre choisi (vide s'il n'en a pas). */
-function majUrlDuTitreChoisi() {
-  const select = document.getElementById("pw-form-lien-titre");
-  const champ = document.getElementById("pw-form-lien-url");
-  if (!select || !champ) return;
-  const titre = coursParTitre.get(Number(select.value));
-  champ.value = (titre && titre.url_cours) || "";
-}
-
-/**
- * Enregistre le lien saisi dans le formulaire. Passe par le MÊME chemin que le
- * champ en ligne (`enregistrerLien`) : un seul endroit décide de ce qui arrive
- * quand un lien change, et les deux saisies ne peuvent pas diverger.
- */
-async function suivreTitreChoisi() {
-  const select = document.getElementById("pw-form-lien-titre");
-  const champ = document.getElementById("pw-form-lien-url");
-  if (!select || !champ || !select.value) return;
-  // `enregistrerLien` lit l'identifiant sur le champ lui-même (c'est ce que
-  // fait la rangée) : on le lui pose ici plutôt que de dupliquer sa logique.
-  champ.dataset.id = select.value;
-  await enregistrerLien(champ);
-  remplirMenuTitres();
-}
 
 /* ---------- Le champ « lien » sur chaque titre suivi ---------- */
 
@@ -394,8 +314,29 @@ function greffeLiens() {
     // qu'il y a quelque chose derrière la flèche.
     if (suivi) bascule.classList.add("pw-bascule-suivi");
     const nom = ligne.querySelector(".import-mapping-nom");
+    // LE GLOBE, À GAUCHE DE LA FLÈCHE, et SEULEMENT pour un titre suivi en
+    // ligne. C'est la seule chose de cet écran qui dise D'OÙ vient un cours :
+    // rien ne distinguait un cours relu ce matin sur Internet d'un cours tapé
+    // à la main il y a six mois — sinon la teinte de la flèche, qui dit aussi
+    // « déplié » et ne pouvait donc pas dire cela seule.
+    //
+    // ABSENT, ET NON GRISÉ, quand le titre n'est pas suivi : un pictogramme
+    // éteint sur chaque rangée d'une liste de quinze titres ferait une colonne
+    // de bruit là où il n'y a rien à signaler.
     if (nom) nom.after(bascule);
     else ligne.prepend(bascule);
+    // La flèche est posée d'abord, le globe se glisse JUSTE AVANT elle : c'est
+    // la seule façon d'obtenir « nom · globe · flèche » sans dépendre de
+    // l'ordre des deux insertions après le nom, qui se lit à l'envers.
+    if (suivi) {
+      const globe = document.createElement("span");
+      globe.className = "pw-globe";
+      globe.innerHTML = ICONE_GLOBE;
+      globe.title = t("Cours relu en ligne");
+      globe.setAttribute("role", "img");
+      globe.setAttribute("aria-label", globe.title);
+      bascule.before(globe);
+    }
 
     const greffe = document.createElement("div");
     greffe.className = "pw-lien";
@@ -608,7 +549,6 @@ async function chargerPlacementsAvecCours() {
   if (typeof loadPlacements === "function") await loadPlacements();
   poserBarre();
   greffeLiens();
-  poserFormulaireLien();
   ajusterInfoBulle();
   await poserAideSources();
 }

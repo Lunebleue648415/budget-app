@@ -15,6 +15,7 @@ from .constants import (
     COLONNES_IMPORT_POSITION_PAR_DEFAUT,
     MONNAIE_INITIALE_NOM,
     MONNAIE_INITIALE_SYMBOLE,
+    NB_MAX_PARTS_DECOUPE,
     NOMS_TYPES_INITIAUX,
     ORDRE_TYPES,
     TYPES_INTERNES,
@@ -523,6 +524,7 @@ def get_operations(
     date_fin: Optional[date_type] = None,
     montant_min: Optional[float] = None,
     montant_max: Optional[float] = None,
+    paires_virement: bool = False,
 ):
     """Chaque filtre est facultatif ; ceux qui valent None ne bornent rien.
 
@@ -531,6 +533,17 @@ def get_operations(
     100 » attrape donc aussi bien une dépense de 80 € qu'une entrée de 80 €, ce
     qui est ce qu'on cherche en filtrant sur un ordre de grandeur — le signe se
     choisit déjà par l'onglet.
+
+    `paires_virement` : UN VIREMENT EST INDIVISIBLE. Ses deux écritures ne sont
+    pas deux opérations qui se ressemblent, c'est UN mouvement décrit des deux
+    côtés — et aucun filtre ne s'applique pareil aux deux. Filtrer sur le compte
+    émetteur ne retenait que sa jambe, filtrer sur un montant ne retenait qu'un
+    côté d'un virement avec change : l'écran recevait alors une moitié de
+    virement et l'affichait comme un virement à qui il manque un compte. C'est
+    le drapeau que pose l'écran Opérations, qui affiche les virements PAR PAIRE
+    et ne peut rien faire d'une moitié. Les autres appelants ne le posent pas :
+    ils lisent des opérations, pas des virements, et une jambe hors filtre n'a
+    rien à faire dans leur liste.
     """
     query = db.query(models.Operation)
     if compte_id is not None:
@@ -547,7 +560,34 @@ def get_operations(
         query = query.filter(models.Operation.montant >= montant_min)
     if montant_max is not None:
         query = query.filter(models.Operation.montant <= montant_max)
-    return query.order_by(models.Operation.date.desc(), models.Operation.id.desc()).all()
+    tri = (models.Operation.date.desc(), models.Operation.id.desc())
+    operations = query.order_by(*tri).all()
+    if not paires_virement:
+        return operations
+
+    # Les jambes manquantes des virements déjà retenus. Une seconde requête
+    # plutôt qu'un OR dans la première : le filtre porte sur les opérations, et
+    # on ne sait quels virements compléter qu'une fois qu'on sait lesquels sont
+    # retenus.
+    virement_ids = {op.virement_id for op in operations if op.virement_id is not None}
+    if not virement_ids:
+        return operations
+    deja = {op.id for op in operations}
+    manquantes = (
+        db.query(models.Operation)
+        .filter(
+            models.Operation.virement_id.in_(virement_ids),
+            models.Operation.id.notin_(deja) if deja else True,
+        )
+        .all()
+    )
+    if not manquantes:
+        return operations
+    # Retriées ensemble : les jambes ramenées ici doivent se ranger à leur date
+    # parmi les autres, et non s'empiler à la fin.
+    return sorted(
+        operations + manquantes, key=lambda op: (op.date, op.id), reverse=True
+    )
 
 
 def get_operation(db: Session, operation_id: int):
@@ -661,11 +701,98 @@ def _normaliser_categorie_selon_type(db: Session, type_code: str, categorie_id):
     return (categorie.id if categorie else None), (categorie.nom if categorie else None)
 
 
+def erreur_decoupes(code: str, montant: float, decoupes) -> Optional[str]:
+    """Ce qui interdit cette découpe, ou None si elle est valable.
+
+    LE GARDE-FOU CENTRAL : la somme des parts vaut le montant, exactement. Sans
+    lui, l'histogramme cesserait de totaliser les mêmes sorties que les KPI
+    posés juste à côté, et rien à l'écran ne dirait laquelle des deux valeurs
+    croire.
+
+    Écrit ici, à côté de `erreur_montant_du`, et pour la même raison : les
+    routes en font un 400 lisible, et `_appliquer_decoupes` s'en sert comme
+    dernier filet pour les appels internes (import bancaire) que ne traverse
+    aucune validation de route.
+
+    LA TOLÉRANCE EST D'UN DEMI-CENTIME. Les montants sont des flottants, et
+    30 + 90 ne fait pas toujours exactement 120 en binaire ; exiger l'égalité
+    stricte aurait refusé des découpes justes. Un demi-centime est en dessous
+    de ce que l'app sait afficher, donc de ce que l'utilisateur peut vouloir
+    dire.
+    """
+    if not decoupes:
+        return None
+    if TypeOperation(code) != TypeOperation.classique:
+        return (
+            "seule une opération classique peut être découpée : les autres "
+            "types portent une catégorie imposée, un montant dû ou une "
+            "contrepartie, que la découpe ne saurait pas répartir"
+        )
+    if len(decoupes) < 2:
+        return (
+            "une découpe compte au moins deux parts ; pour une seule "
+            "catégorie, choisis-la directement"
+        )
+    if len(decoupes) > NB_MAX_PARTS_DECOUPE:
+        return f"une découpe ne peut pas dépasser {NB_MAX_PARTS_DECOUPE} parts"
+    categories = [part.categorie_id for part in decoupes]
+    if len(set(categories)) != len(categories):
+        return "une même catégorie ne peut pas apparaître deux fois dans la découpe"
+    total = sum(part.montant for part in decoupes)
+    if abs(total - montant) > 0.005:
+        return (
+            f"la somme des parts ({total:.2f}) doit valoir le montant de "
+            f"l'opération ({montant:.2f})"
+        )
+    return None
+
+
+def _appliquer_decoupes(db_operation: models.Operation, code: str, decoupes) -> None:
+    """Remplace les parts d'une opération par celles fournies, ou les efface.
+
+    `code` est passé plutôt que lu sur l'opération : à la création, la relation
+    `type_operation` n'est pas encore chargée (la ligne n'est même pas dans la
+    session), et `db_operation.type_code` échouerait.
+
+    LA CATÉGORIE UNIQUE ET LES PARTS S'EXCLUENT : poser une découpe met
+    `categorie_id` à NULL, et la retirer laisse l'opération sans catégorie —
+    l'écran en redemande alors une, comme pour toute opération classique qui
+    n'en a pas encore. Garder l'ancienne catégorie sous la découpe aurait
+    ressuscité un classement que l'utilisateur avait remplacé.
+
+    UNE DÉCOUPE INVALIDE EST IGNORÉE, PAS RATTRAPÉE. Contrairement à
+    `montant_du`, qu'on peut ramener dans sa borne sans rien inventer, il n'y a
+    aucune façon honnête de corriger des parts qui ne totalisent pas le
+    montant : redresser la dernière reviendrait à classer de l'argent dans une
+    catégorie que personne n'a choisie. Les routes refusent déjà le cas en 400
+    (cf. erreur_decoupes) ; pour un appel interne, l'opération reste simplement
+    non découpée.
+    """
+    db_operation.decoupes.clear()
+    if not decoupes:
+        return
+    if erreur_decoupes(code, db_operation.montant, decoupes):
+        return
+    db_operation.categorie_id = None
+    for rang, part in enumerate(decoupes):
+        db_operation.decoupes.append(
+            models.OperationDecoupe(
+                categorie_id=part.categorie_id, montant=part.montant, ordre=rang
+            )
+        )
+
+
 def create_operation(db: Session, operation: schemas.OperationCreate) -> models.Operation:
     type_operation = get_type_operation(db, operation.type_id)
     code = type_operation.code
-    data = operation.model_dump(exclude={"operations_remboursees"})
+    data = operation.model_dump(exclude={"operations_remboursees", "decoupes"})
 
+    # UNE OPÉRATION DÉCOUPÉE N'A PAS DE CATÉGORIE : effacée AVANT le calcul du
+    # sens, qui la lit. Un payload qui porterait les deux (un écran qui bascule
+    # d'un mode à l'autre sans vider le champ qu'il quitte) aurait sinon pris
+    # son sens d'une catégorie que l'opération n'allait pas garder.
+    if operation.decoupes:
+        data["categorie_id"] = None
     data["categorie_id"], nom_categorie = _normaliser_categorie_selon_type(
         db, code, data.get("categorie_id")
     )
@@ -680,6 +807,10 @@ def create_operation(db: Session, operation: schemas.OperationCreate) -> models.
     )
 
     db_operation = models.Operation(**data)
+    # Les parts AVANT le premier commit : une opération qui naîtrait découpée
+    # ET catégorisée aurait existé, ne serait-ce qu'un instant, dans l'état que
+    # la table interdit.
+    _appliquer_decoupes(db_operation, code, operation.decoupes)
     db.add(db_operation)
     db.commit()
     db.refresh(db_operation)
@@ -704,7 +835,9 @@ def update_operation(
     # ponctuel doit nettoyer ses occurrences futures (cf. _arreter_recurrence,
     # appelé plus bas une fois le nouvel état de `recurrente` connu).
     etait_modele_recurrent = db_operation.recurrente and db_operation.recurrence_parent_id is None
-    data = updates.model_dump(exclude_unset=True, exclude={"operations_remboursees"})
+    data = updates.model_dump(
+        exclude_unset=True, exclude={"operations_remboursees", "decoupes"}
+    )
     montant_du_fourni = "montant_du" in data
     montant_a_rembourser_fourni = "montant_a_rembourser" in data
     for field, value in data.items():
@@ -716,6 +849,25 @@ def update_operation(
     # en cache après un simple setattr sur `type_id`, et renverrait l'ancien
     # code.
     code = get_type_operation(db, db_operation.type_id).code
+
+    # LES PARTS AVANT LA CATÉGORIE ET LE SENS, qui se calculent tous deux
+    # d'après elle : une opération découpée n'a pas de catégorie, et son sens ne
+    # doit donc pas venir de celle qu'elle vient de perdre.
+    #
+    # `None` = ne touche à rien, `[]` = efface. Une découpe devenue invalide —
+    # le montant a changé, ou le type est sorti de `classique` — est abandonnée
+    # plutôt que rattrapée : il n'existe aucune façon honnête de décider quelle
+    # part encaisse la différence. Les routes refusent déjà le cas en 400 ; ceci
+    # ne concerne que les appels internes.
+    if updates.decoupes is not None:
+        _appliquer_decoupes(db_operation, code, updates.decoupes)
+    elif db_operation.decoupes and erreur_decoupes(
+        code, db_operation.montant, db_operation.decoupes
+    ):
+        db_operation.decoupes.clear()
+    if db_operation.decoupes:
+        db_operation.categorie_id = None
+
     db_operation.categorie_id, nom_categorie = _normaliser_categorie_selon_type(
         db, code, db_operation.categorie_id
     )
@@ -1110,6 +1262,33 @@ def _natures_virement(
     )
 
 
+def _jambe_des_frais(virement: schemas.VirementCreate) -> str:
+    """Laquelle des deux écritures porte les frais : « sortante » ou « entrante ».
+
+    SUR UNE SEULE, et c'est tout l'enjeu : les frais sont DÉJÀ compris dans les
+    deux montants — ajoutés à ce qui part, ou retranchés de ce qui arrive, selon
+    le côté qu'ils ont grevé (cf. services/import_bancaire._appliquer_frais).
+    Les inscrire des deux côtés les ferait lire deux fois, et l'écran de
+    modification en redemanderait deux fois la déduction.
+
+    C'EST LEUR DEVISE QUI DÉSIGNE, comme à l'import : des frais en euros sur un
+    virement euros → dollars ont grevé l'émission ; les mêmes en dollars ont
+    grevé la réception. À devise égale des deux côtés (le cas ordinaire), c'est
+    l'ÉMISSION qui les porte — payer 2 € de frais sur un envoi de 100 € fait
+    102 € débités, et c'est cette lecture-là qui vaut.
+    """
+    if virement.monnaie_frais_id is None:
+        return "sortante"
+    if virement.monnaie_frais_id == virement.monnaie_id:
+        return "sortante"
+    if virement.monnaie_frais_id == virement.monnaie_destination_resolue:
+        return "entrante"
+    # Devise étrangère aux deux : l'import refuse ce cas (frais incohérents), et
+    # rien d'autre ne peut le produire. On les pose côté émission plutôt que de
+    # les perdre.
+    return "sortante"
+
+
 def create_virement(
     db: Session,
     virement: schemas.VirementCreate,
@@ -1121,6 +1300,10 @@ def create_virement(
         virement, compte_source, compte_destination
     )
     type_virement = get_type_operation_par_code(db, TypeOperation.virement.value)
+    # Les frais ne vont que sur UNE jambe (cf. _jambe_des_frais) : ils sont déjà
+    # compris dans son montant, les porter des deux côtés les ferait lire deux
+    # fois.
+    frais_sur = _jambe_des_frais(virement)
 
     # Les deux écritures portent chacune SA monnaie et SON montant : c'est ce
     # qui permet d'envoyer 100 € et d'en recevoir 108 $ sans qu'aucun taux de
@@ -1140,6 +1323,10 @@ def create_virement(
         montant_a_rembourser=0.0,
         virement_id=virement_id,
         notes=virement.notes,
+        frais=virement.frais if frais_sur == "sortante" else None,
+        monnaie_frais_id=(
+            virement.monnaie_frais_id if frais_sur == "sortante" else None
+        ),
     )
     op_entrante = models.Operation(
         date=virement.date,
@@ -1155,6 +1342,10 @@ def create_virement(
         montant_a_rembourser=0.0,
         virement_id=virement_id,
         notes=virement.notes,
+        frais=virement.frais if frais_sur == "entrante" else None,
+        monnaie_frais_id=(
+            virement.monnaie_frais_id if frais_sur == "entrante" else None
+        ),
     )
     db.add(op_sortante)
     db.add(op_entrante)
@@ -1189,6 +1380,11 @@ def update_virement(
         virement, compte_source, compte_destination
     )
 
+    # La jambe qui portait les frais peut changer avec leur devise : l'autre est
+    # remise à zéro, sans quoi des frais déplacés resteraient inscrits des deux
+    # côtés.
+    frais_sur = _jambe_des_frais(virement)
+
     sortante.date = virement.date
     sortante.compte_id = compte_source.id
     sortante.montant = virement.montant
@@ -1196,6 +1392,10 @@ def update_virement(
     sortante.statut = virement.statut
     sortante.nature = nature_sortante
     sortante.notes = virement.notes
+    sortante.frais = virement.frais if frais_sur == "sortante" else None
+    sortante.monnaie_frais_id = (
+        virement.monnaie_frais_id if frais_sur == "sortante" else None
+    )
 
     entrante.date = virement.date
     entrante.compte_id = compte_destination.id
@@ -1204,6 +1404,10 @@ def update_virement(
     entrante.statut = virement.statut
     entrante.nature = nature_entrante
     entrante.notes = virement.notes
+    entrante.frais = virement.frais if frais_sur == "entrante" else None
+    entrante.monnaie_frais_id = (
+        virement.monnaie_frais_id if frais_sur == "entrante" else None
+    )
 
     db.commit()
     db.refresh(sortante)
@@ -2033,6 +2237,9 @@ def create_operation_importee(
     amorti: bool = False,
     amortissement_debut: Optional[date_type] = None,
     amortissement_fin: Optional[date_type] = None,
+    decoupes=None,
+    frais: Optional[float] = None,
+    monnaie_frais_id: Optional[int] = None,
 ) -> models.Operation:
     """Crée une opération issue d'un import bancaire : la vérification a déjà
     eu lieu ligne par ligne dans l'aperçu, avant confirmation (voir
@@ -2062,6 +2269,10 @@ def create_operation_importee(
     ramenées au 1er du mois comme partout ailleurs (cf.
     _normaliser_amortissement)."""
     type_operation = get_type_operation(db, type_id)
+    if decoupes:
+        # Découpée = pas de catégorie (cf. create_operation, même raison : le
+        # sens se calcule d'après elle).
+        categorie_id = None
     categorie_id, nom_categorie = _normaliser_categorie_selon_type(
         db, type_operation.code, categorie_id
     )
@@ -2085,8 +2296,19 @@ def create_operation_importee(
         amorti=amorti,
         amortissement_debut=amortissement_debut,
         amortissement_fin=amortissement_fin,
+        # Les frais que `montant` contient déjà (cf. models.Operation.frais) :
+        # gardés pour que l'écran puisse redécomposer le montant, jamais relus
+        # par un calcul.
+        frais=frais,
+        monnaie_frais_id=monnaie_frais_id,
     )
     _normaliser_amortissement(db_operation)
+    # LA DÉCOUPE POSÉE PAR UNE RÈGLE (cf. services/regles_categorisation.
+    # resoudre_decoupes). Elle a déjà été résolue en montants, et son invariant
+    # revérifié ici par `_appliquer_decoupes` : une découpe qui ne tomberait pas
+    # juste est simplement abandonnée, et la ligne s'importe avec sa catégorie —
+    # un import de trois cents lignes ne doit pas s'arrêter sur une formule.
+    _appliquer_decoupes(db_operation, type_operation.code, decoupes)
     db.add(db_operation)
     db.commit()
     db.refresh(db_operation)
@@ -2115,14 +2337,31 @@ def get_regle_categorisation(db: Session, regle_id: int) -> Optional[models.Regl
     )
 
 
+def _appliquer_decoupes_regle(regle: models.RegleCategorisation, decoupes) -> None:
+    """Remplace les parts d'une règle par celles fournies (schemas.RegleDecoupeInput).
+
+    Les formules sont déjà validées par le schéma ; il ne reste ici qu'à les
+    ranger dans l'ordre. `None` et `[]` valent la même chose : une règle sans
+    part classe par sa catégorie unique."""
+    regle.decoupes.clear()
+    for rang, part in enumerate(decoupes or []):
+        regle.decoupes.append(
+            models.RegleDecoupe(
+                categorie_id=part.categorie_id, formule=part.formule.strip(), ordre=rang
+            )
+        )
+
+
 def create_regle_categorisation(
     db: Session,
     *,
     nom: str,
+    description: str = "",
     conditions: dict,
     type_id: int,
     categorie_id: Optional[int] = None,
     compte_autre_id: Optional[int] = None,
+    decoupes=None,
     actif: bool = True,
     arreter_apres: bool = True,
     ordre: Optional[int] = None,
@@ -2134,6 +2373,7 @@ def create_regle_categorisation(
         ordre = (ordre_max + 1) if ordre_max is not None else 0
     regle = models.RegleCategorisation(
         nom=nom,
+        description=description,
         conditions=conditions,
         type_id=type_id,
         categorie_id=categorie_id,
@@ -2142,6 +2382,7 @@ def create_regle_categorisation(
         arreter_apres=arreter_apres,
         ordre=ordre,
     )
+    _appliquer_decoupes_regle(regle, decoupes)
     db.add(regle)
     db.commit()
     db.refresh(regle)
@@ -2151,11 +2392,17 @@ def create_regle_categorisation(
 def update_regle_categorisation(
     db: Session, regle: models.RegleCategorisation, **champs
 ) -> models.RegleCategorisation:
+    """`decoupes` y est traité à part des autres champs : ce n'est pas une
+    colonne mais une collection, qu'un `setattr` remplacerait par des schémas
+    Pydantic au lieu de lignes de table."""
+    if "decoupes" in champs:
+        _appliquer_decoupes_regle(regle, champs.pop("decoupes"))
     # `categorie_id` est légitimement remis à None (passage à un type dont la
     # catégorie est imposée) : on distingue "absent" de "None" via la présence
     # de la clé, d'où **champs plutôt que des paramètres optionnels.
     for nom_champ in (
         "nom",
+        "description",
         "conditions",
         "type_id",
         "categorie_id",
@@ -2218,6 +2465,7 @@ def create_regle_import_placement(
     db: Session,
     *,
     nom: str,
+    description: str = "",
     conditions: dict,
     type_placement: str,
     compte_autre_id: Optional[int] = None,
@@ -2232,6 +2480,7 @@ def create_regle_import_placement(
         ordre = (ordre_max + 1) if ordre_max is not None else 0
     regle = models.RegleImportPlacement(
         nom=nom,
+        description=description,
         conditions=conditions,
         type_placement=type_placement,
         compte_autre_id=compte_autre_id,
@@ -2250,6 +2499,7 @@ def update_regle_import_placement(
 ) -> models.RegleImportPlacement:
     for nom_champ in (
         "nom",
+        "description",
         "conditions",
         "type_placement",
         "compte_autre_id",
@@ -2276,32 +2526,6 @@ def reordonner_regles_import_placement(db: Session, ids_ordonnes: list[int]) -> 
         if regle is not None:
             regle.ordre = position
     db.commit()
-
-
-def set_remuneration_compte(
-    db: Session,
-    compte: models.Compte,
-    *,
-    taux: Optional[float],
-    frequence: Optional[str],
-    debut=None,
-) -> models.Compte:
-    """Pose (ou retire) le taux de rémunération d'un compte.
-
-    LES TROIS VONT ENSEMBLE : un taux sans fréquence ne décrit rien de
-    calculable, et une fréquence sans taux non plus. Le routeur de l'extension
-    « Taux d'épargne » impose donc les deux, ou aucun — et « aucun » remet les
-    trois colonnes à NULL, ce qui est bien ce que veut dire « ce compte n'est
-    pas rémunéré ».
-
-    Dans le noyau alors que l'écran est dans l'extension : une extension
-    n'emporte jamais son schéma, ni les accès à sa table."""
-    compte.taux_remuneration = taux
-    compte.frequence_remuneration = frequence
-    compte.remuneration_debut = debut
-    db.commit()
-    db.refresh(compte)
-    return compte
 
 
 # ---------- Sous-filtres / projets ----------
