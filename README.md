@@ -1,7 +1,4 @@
 # Budget App
-
-Salut salut, si tu lis ceci c'est sûrement que je t'ai eu avec une accroche digne des plus grands politiciens. 
-
 Petit disclaimer avant de rentrer dans le vif du sujet : cette app a été entièrement conçue à l'aide de Claude Code. Si c'est quelque chose qui te dérange ou à laquelle tu t'opposes, je préfère que tu le saches.
 
 Cette app est née suite au besoin que j'avais de suivre mes dépenses. Pendant à peu près un an, Excel s'est avéré suffisant. Mais force est de constater qu'avec plusieurs comptes, devises et d'autres raisons, l'outil n'est pas le plus pratique. 
